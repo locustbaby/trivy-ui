@@ -11,12 +11,8 @@ Trivy UI provides a centralized dashboard for viewing vulnerability reports gene
 ![Dashboard Overview](./trivy-dashboard/public/trivy-dashboard.png)
 *Main dashboard showing vulnerability statistics and summary*
 
-### Vulnerability Report List
-![Vulnerability Reports](./trivy-dashboard/public/report-details.png)
-*Detailed list of vulnerability reports with filtering options*
-
 ### Report Details
-![Report Details](./docs/images/report-details.png)
+![Report Details](./trivy-dashboard/public/report-details.png)
 *In-depth view of individual vulnerability reports*
 
 
