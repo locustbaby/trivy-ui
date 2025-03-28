@@ -107,6 +107,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: trivy-ui
+EOF
 ```
 
 2. Deploy the Trivy UI application
@@ -192,6 +193,7 @@ spec:
   - hosts:
     - trivy-ui.example.com
     secretName: trivy-ui-tls
+EOF
 ```
 
 ## Environment Variables
