@@ -66,6 +66,136 @@ go build
 ```
 4. Access the dashboard at http://localhost:8080
 
+### Run into Kubernetes
+1. Create a ServiceAccount and ClusterRoleBinding
+```shell
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: trivy-ui
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - aquasecurity.github.io
+  resources:
+  - clustercompliancereports
+  - clusterconfigauditreports
+  - clusterinfraassessmentreports
+  - clusterrbacassessmentreports
+  - clustersbomreports
+  - clustervulnerabilityreports
+  - configauditreports
+  - exposedsecretreports
+  - infraassessmentreports
+  - rbacassessmentreports
+  - sbomreports
+  - vulnerabilityreports
+  verbs:
+  - get
+  - list
+EOF
+
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trivy-ui
+EOF
+```
+
+2. Deploy the Trivy UI application
+```shell
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: trivy-ui
+  name: trivy-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trivy-ui
+  template:
+    metadata:
+      labels:
+        app: trivy-ui
+    spec:
+      containers:
+      - env:
+        - name: STATIC_PATH
+          value: trivy-dashboard/dist
+        image: <image>
+        name: trivy-ui
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        resources:
+          limits:
+            memory: 64Mi
+          requests:
+            memory: 64Mi
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+EOF
+```
+
+3. Create Ingress and Service
+```shell
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: trivy-ui
+  name: trivy-ui
+spec:
+    ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+    selector:
+      app: trivy-ui
+    type: ClusterIP
+EOF
+
+kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+  labels:
+    app: trivy-ui
+  name: trivy-ui
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: trivy-ui.example.com
+    http:
+      paths:
+      - backend:
+          service:
+            name: trivy-ui
+            port:
+              number: 8080
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts:
+    - trivy-ui.example.com
+    secretName: trivy-ui-tls
+EOF
+```
+
 ## Environment Variables
 The server can be configured using the following environment variables:
 
