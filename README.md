@@ -123,7 +123,7 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      appselector: trivy-ui
+      app: trivy-ui
   template:
     metadata:
       labels:
@@ -161,10 +161,10 @@ metadata:
 spec:
     ports:
     - name: http
-        port: 80
-        targetPort: 8080
+      port: 80
+      targetPort: 8080
     selector:
-        appselector: trivy-ui
+      app: trivy-ui
     type: ClusterIP
 EOF
 
