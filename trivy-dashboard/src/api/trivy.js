@@ -20,3 +20,18 @@ export async function fetchReportDetails(namespace, reportName) {
   const response = await axios.get(`${apiBaseUrl}/report-details?namespace=${namespace}&reportName=${reportName}`)
   return response.data
 }
+
+export async function fetchClusters() {
+  const response = await axios.get(`${apiBaseUrl}/clusters`)
+  return response.data || []
+}
+
+export async function addCluster(clusterData) {
+  const response = await axios.post(`${apiBaseUrl}/clusters`, clusterData)
+  return response.data
+}
+
+export async function deleteCluster(clusterName) {
+  const response = await axios.delete(`${apiBaseUrl}/clusters/${clusterName}`)
+  return response.data
+}

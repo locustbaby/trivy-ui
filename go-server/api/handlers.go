@@ -217,6 +217,97 @@ func SaveReportHistory(report interface{}) {
 	}
 }
 
+// FetchClusters handles the /clusters endpoint to list all clusters
+func FetchClusters(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Get all clusters from cache
+	clusters, err := cache.GetClusters()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return clusters as JSON
+	responseData, err := json.Marshal(clusters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(responseData)
+}
+
+// AddCluster handles the /clusters endpoint with POST method
+func AddCluster(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST method
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// Parse request body
+	var cluster cache.Cluster
+	if err := json.NewDecoder(r.Body).Decode(&cluster); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Add cluster to cache
+	if err := cache.AddCluster(cluster); err != nil {
+		if err == cache.ErrClusterExists {
+			http.Error(w, "Cluster with this name already exists", http.StatusConflict)
+		} else {
+			http.Error(w, "Failed to add cluster: "+err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Return success response
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Cluster added successfully"})
+}
+
+// DeleteCluster handles the /clusters/{name} endpoint with DELETE method
+func DeleteCluster(w http.ResponseWriter, r *http.Request) {
+	// Only allow DELETE method
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// Get cluster name from URL path
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 3 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+
+	clusterName := parts[len(parts)-1]
+	if clusterName == "" {
+		http.Error(w, "Cluster name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Delete cluster from cache
+	if err := cache.DeleteCluster(clusterName); err != nil {
+		if err == cache.ErrClusterNotFound {
+			http.Error(w, "Cluster not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "Failed to delete cluster: "+err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Return success response
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Cluster deleted successfully"})
+}
+
 // SpaHandler serves the Single Page Application frontend
 func SpaHandler(staticPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +315,8 @@ func SpaHandler(staticPath string) http.HandlerFunc {
 		if strings.HasPrefix(r.URL.Path, "/namespaces") ||
 			strings.HasPrefix(r.URL.Path, "/vulnerability-reports") ||
 			strings.HasPrefix(r.URL.Path, "/report-details") ||
-			strings.HasPrefix(r.URL.Path, "/report-history") {
+			strings.HasPrefix(r.URL.Path, "/report-history") ||
+			strings.HasPrefix(r.URL.Path, "/clusters") {
 			return
 		}
 

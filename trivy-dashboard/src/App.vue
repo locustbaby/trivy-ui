@@ -1,20 +1,20 @@
 <template>
   <n-config-provider>
     <n-message-provider>
-      <TrivyReport />
+      <Dashboard />
     </n-message-provider>
   </n-config-provider>
 </template>
 
 <script>
 import { NConfigProvider, NMessageProvider } from 'naive-ui'
-import TrivyReport from './views/TrivyReport.vue'
+import Dashboard from './views/Dashboard.vue'
 
 export default {
   components: {
     NConfigProvider,
     NMessageProvider,
-    TrivyReport
+    Dashboard
   }
 }
 </script>
