@@ -29,11 +29,15 @@ jobs:
         id: extract_tag
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BRANCH_NAME="${{ github.head_ref }}"
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
-            TAG_NAME="${TIMESTAMP}-${SHORT_SHA}"
+            TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
+          elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
+            BRANCH_NAME="${{ github.ref#refs/heads/ }}"
+            TAG_NAME="${BRANCH_NAME}-latest"
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            TAG_NAME="${{ github.ref#refs/tags/ }}"
           else
             TAG_NAME="latest"
           fi

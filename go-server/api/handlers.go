@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -16,14 +17,77 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	k8s "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"trivy-ui/cache"
 	"trivy-ui/kubernetes"
 )
 
+// Response codes
+const (
+	CodeSuccess          = 0
+	CodeInvalidRequest   = 11
+	CodeNotFound         = 12
+	CodeAlreadyExists    = 13
+	CodeInternalError    = 14
+	CodeMethodNotAllowed = 15
+)
+
+// Response represents a standard API response
+type Response struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// writeJSON writes a JSON response with the given code, message and data
+func writeJSON(w http.ResponseWriter, code int, message string, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(Response{
+		Code:    code,
+		Message: message,
+		Data:    data,
+	})
+}
+
+// writeError writes an error response
+func writeError(w http.ResponseWriter, code int, message string) {
+	writeJSON(w, code, message, nil)
+}
+
 // FetchNamespaces handles the /namespaces endpoint
 func FetchNamespaces(w http.ResponseWriter, r *http.Request) {
-	cacheKey := cache.NamespacesKey()
+	// Get cluster parameter
+	cluster := r.URL.Query().Get("cluster")
+	if cluster == "" {
+		http.Error(w, "Cluster parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get cluster configuration
+	clusterObj, err := kubernetes.GetCluster(cluster)
+	if err != nil {
+		http.Error(w, "Cluster not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Create a new Kubernetes client for this cluster
+	config, err := clientcmd.BuildConfigFromFlags("", clusterObj.KubeConfig)
+	if err != nil {
+		http.Error(w, "Error building kubeconfig: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	clientset, err := k8s.NewForConfig(config)
+	if err != nil {
+		http.Error(w, "Error creating Kubernetes client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Generate cache key
+	cacheKey := cache.NamespacesKey(cluster)
 	w.Header().Set("Content-Type", "application/json")
 
 	// Try to get from cache
@@ -37,7 +101,7 @@ func FetchNamespaces(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Cache", "MISS")
 
 	// Fetch from Kubernetes API
-	namespaces, err := kubernetes.Clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+	namespaces, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -59,6 +123,13 @@ func FetchVulnerabilityReports(w http.ResponseWriter, r *http.Request) {
 		namespace = "default"
 	}
 
+	// Get cluster parameter
+	cluster := r.URL.Query().Get("cluster")
+	if cluster == "" {
+		http.Error(w, "Cluster parameter is required", http.StatusBadRequest)
+		return
+	}
+
 	// Add pagination parameters
 	limitStr := r.URL.Query().Get("limit")
 	continueToken := r.URL.Query().Get("continue")
@@ -72,7 +143,7 @@ func FetchVulnerabilityReports(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate cache key
-	cacheKey := cache.ReportsKey(namespace, limit, continueToken, search)
+	cacheKey := cache.ReportsKey(cluster+"_"+namespace, limit, continueToken, search)
 	w.Header().Set("Content-Type", "application/json")
 
 	// Try to get from cache
@@ -84,6 +155,26 @@ func FetchVulnerabilityReports(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-Cache", "MISS")
+
+	// Get cluster configuration
+	clusterObj, err := kubernetes.GetCluster(cluster)
+	if err != nil {
+		http.Error(w, "Cluster not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Create a new Kubernetes client for this cluster
+	config, err := clientcmd.BuildConfigFromFlags("", clusterObj.KubeConfig)
+	if err != nil {
+		http.Error(w, "Error building kubeconfig: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		http.Error(w, "Error creating dynamic client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	// Fetch from Kubernetes API with pagination
 	listOptions := metav1.ListOptions{
@@ -97,7 +188,7 @@ func FetchVulnerabilityReports(w http.ResponseWriter, r *http.Request) {
 		Resource: "vulnerabilityreports",
 	}
 
-	reports, err := kubernetes.DynamicClient.Resource(gvr).Namespace(namespace).List(context.TODO(), listOptions)
+	reports, err := dynamicClient.Resource(gvr).Namespace(namespace).List(context.TODO(), listOptions)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -107,6 +198,16 @@ func FetchVulnerabilityReports(w http.ResponseWriter, r *http.Request) {
 	if search != "" {
 		filteredItems := filterReports(reports.Items, search)
 		reports.Items = filteredItems
+	}
+
+	// Add cluster label to each report
+	for i := range reports.Items {
+		labels := reports.Items[i].GetLabels()
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+		labels["trivy-operator.cluster"] = cluster
+		reports.Items[i].SetLabels(labels)
 	}
 
 	// Cache and return response
@@ -148,19 +249,28 @@ func filterReports(items []unstructured.Unstructured, search string) []unstructu
 func FetchReportDetails(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
 	if namespace == "" {
-		namespace = "default"
+		http.Error(w, "Namespace parameter is required", http.StatusBadRequest)
+		return
 	}
 
 	reportName := r.URL.Query().Get("reportName")
 	if reportName == "" {
-		http.Error(w, "reportName is required", http.StatusBadRequest)
+		http.Error(w, "Report name parameter is required", http.StatusBadRequest)
 		return
 	}
 
-	// Try to get from cache
-	cacheKey := cache.ReportDetailsKey(namespace, reportName)
+	// Get cluster parameter
+	cluster := r.URL.Query().Get("cluster")
+	if cluster == "" {
+		http.Error(w, "Cluster parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Generate cache key
+	cacheKey := cache.ReportDetailsKey(cluster+"_"+namespace, reportName)
 	w.Header().Set("Content-Type", "application/json")
 
+	// Try to get from cache
 	if cachedData, found := cache.Store.Get(cacheKey); found {
 		w.Header().Set("X-Cache", "HIT")
 		if cachedBytes, ok := cachedData.([]byte); ok {
@@ -170,18 +280,46 @@ func FetchReportDetails(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Cache", "MISS")
 
-	// Get from Kubernetes API
+	// Get cluster configuration
+	clusterObj, err := kubernetes.GetCluster(cluster)
+	if err != nil {
+		http.Error(w, "Cluster not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Create a new Kubernetes client for this cluster
+	config, err := clientcmd.BuildConfigFromFlags("", clusterObj.KubeConfig)
+	if err != nil {
+		http.Error(w, "Error building kubeconfig: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		http.Error(w, "Error creating dynamic client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Fetch from Kubernetes API
 	gvr := schema.GroupVersionResource{
 		Group:    "aquasecurity.github.io",
 		Version:  "v1alpha1",
 		Resource: "vulnerabilityreports",
 	}
 
-	report, err := kubernetes.DynamicClient.Resource(gvr).Namespace(namespace).Get(context.TODO(), reportName, metav1.GetOptions{})
+	report, err := dynamicClient.Resource(gvr).Namespace(namespace).Get(context.TODO(), reportName, metav1.GetOptions{})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Add cluster label to report
+	labels := report.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels["trivy-operator.cluster"] = cluster
+	report.SetLabels(labels)
 
 	// Cache and return response
 	responseData, err := json.Marshal(report)
@@ -190,7 +328,7 @@ func FetchReportDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cache.Store.Set(cacheKey, responseData, 5*time.Minute)
+	cache.Store.Set(cacheKey, responseData, 2*time.Minute)
 	w.Write(responseData)
 }
 
@@ -221,8 +359,7 @@ func SaveReportHistory(report interface{}) {
 func FetchClusters(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Get all clusters from cache
-	clusters, err := cache.GetClusters()
+	clusters, err := kubernetes.GetClusters()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -249,15 +386,15 @@ func AddCluster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// Parse request body
-	var cluster cache.Cluster
+	var cluster kubernetes.Cluster
 	if err := json.NewDecoder(r.Body).Decode(&cluster); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Add cluster to cache
-	if err := cache.AddCluster(cluster); err != nil {
-		if err == cache.ErrClusterExists {
+	if err := kubernetes.AddCluster(cluster); err != nil {
+		if err == kubernetes.ErrClusterExists {
 			http.Error(w, "Cluster with this name already exists", http.StatusConflict)
 		} else {
 			http.Error(w, "Failed to add cluster: "+err.Error(), http.StatusInternalServerError)
@@ -281,21 +418,15 @@ func DeleteCluster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// Get cluster name from URL path
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) < 3 {
-		http.Error(w, "Invalid URL path", http.StatusBadRequest)
-		return
-	}
-
-	clusterName := parts[len(parts)-1]
+	clusterName := strings.TrimPrefix(r.URL.Path, "/clusters/")
 	if clusterName == "" {
 		http.Error(w, "Cluster name is required", http.StatusBadRequest)
 		return
 	}
 
 	// Delete cluster from cache
-	if err := cache.DeleteCluster(clusterName); err != nil {
-		if err == cache.ErrClusterNotFound {
+	if err := kubernetes.DeleteCluster(clusterName); err != nil {
+		if err == kubernetes.ErrClusterNotFound {
 			http.Error(w, "Cluster not found", http.StatusNotFound)
 		} else {
 			http.Error(w, "Failed to delete cluster: "+err.Error(), http.StatusInternalServerError)
@@ -306,6 +437,61 @@ func DeleteCluster(w http.ResponseWriter, r *http.Request) {
 	// Return success response
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Cluster deleted successfully"})
+}
+
+// UpdateCluster handles the /clusters/{name} endpoint with PUT method
+func UpdateCluster(w http.ResponseWriter, r *http.Request) {
+	// Only allow PUT method
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// Get cluster name from URL path
+	clusterName := strings.TrimPrefix(r.URL.Path, "/clusters/")
+	if clusterName == "" {
+		http.Error(w, "Cluster name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse request body
+	var cluster kubernetes.Cluster
+	if err := json.NewDecoder(r.Body).Decode(&cluster); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Log the request data for debugging
+	kubeConfigStatus := "missing"
+	if cluster.KubeConfig != "" {
+		kubeConfigStatus = "present"
+	}
+	log.Printf("Update cluster request: name=%s, kubeConfig=%s, enable=%v",
+		cluster.Name,
+		kubeConfigStatus,
+		cluster.Enable)
+
+	// Validate cluster name matches URL
+	if cluster.Name != clusterName {
+		http.Error(w, "Cluster name in URL does not match request body", http.StatusBadRequest)
+		return
+	}
+
+	// Update cluster in cache
+	if err := kubernetes.UpdateCluster(cluster); err != nil {
+		if err == kubernetes.ErrClusterNotFound {
+			http.Error(w, "Cluster not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "Failed to update cluster: "+err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Return success response
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Cluster updated successfully"})
 }
 
 // SpaHandler serves the Single Page Application frontend
@@ -333,4 +519,54 @@ func SpaHandler(staticPath string) http.HandlerFunc {
 
 		http.FileServer(http.Dir(staticPath)).ServeHTTP(w, r)
 	}
+}
+
+func CreateCluster(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, CodeMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var cluster kubernetes.Cluster
+	if err := json.NewDecoder(r.Body).Decode(&cluster); err != nil {
+		writeError(w, CodeInvalidRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	// Validate cluster data
+	if cluster.Name == "" {
+		writeError(w, CodeInvalidRequest, "Cluster name is required")
+		return
+	}
+	if cluster.KubeConfig == "" {
+		writeError(w, CodeInvalidRequest, "KubeConfig is required")
+		return
+	}
+
+	// Check if cluster already exists
+	clusters, err := kubernetes.GetClusters()
+	if err != nil {
+		writeError(w, CodeInternalError, fmt.Sprintf("Failed to load clusters: %v", err))
+		return
+	}
+
+	for _, c := range clusters {
+		if c.Name == cluster.Name {
+			writeError(w, CodeAlreadyExists, fmt.Sprintf("Cluster '%s' already exists", cluster.Name))
+			return
+		}
+	}
+
+	// Set default enable status
+	cluster.Enable = true
+
+	// Add the new cluster
+	clusters = append(clusters, cluster)
+	if err := kubernetes.SaveClusters(clusters); err != nil {
+		writeError(w, CodeInternalError, fmt.Sprintf("Failed to save cluster: %v", err))
+		return
+	}
+
+	// Return success response with cluster data
+	writeJSON(w, CodeSuccess, "Cluster created successfully", cluster)
 }

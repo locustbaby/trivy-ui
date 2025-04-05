@@ -1,8 +1,9 @@
 import { ref, computed, watch } from 'vue'
-import { fetchNamespaces, fetchVulnerabilityReports, fetchReportDetails } from '../api/trivy'
+import { fetchNamespaces, fetchVulnerabilityReports, fetchReportDetails, fetchClusters } from '../api/trivy'
 
 // Storage key constants
 const NAMESPACE_STORAGE_KEY = 'trivy-selected-namespace'
+const CLUSTER_STORAGE_KEY = 'trivy-selected-cluster'
 const REPORTS_CACHE_PREFIX = 'trivy-reports-'
 const CACHE_EXPIRATION_KEY = 'trivy-cache-expiration'
 
@@ -13,10 +14,13 @@ export function useTrivyData() {
   const loading = ref(false)
   const error = ref(null)
   const namespaces = ref([])
+  const clusters = ref([])
   
-  // Try to get the last selected namespace from localStorage
+  // Try to get the last selected namespace and cluster from localStorage
   const storedNamespace = localStorage.getItem(NAMESPACE_STORAGE_KEY)
+  const storedCluster = localStorage.getItem(CLUSTER_STORAGE_KEY)
   const selectedNamespace = ref(storedNamespace || null)
+  const selectedCluster = ref(storedCluster || null)
   
   const vulnerabilityReports = ref([])
   const reportDetails = ref(null)
@@ -26,10 +30,16 @@ export function useTrivyData() {
     return namespaces.value.map(ns => ({ label: ns.metadata.name, value: ns.metadata.name }))
   })
 
-  // Save selected namespace to localStorage when it changes
+  // Save selected namespace and cluster to localStorage when they change
   watch(selectedNamespace, (newValue) => {
     if (newValue) {
       localStorage.setItem(NAMESPACE_STORAGE_KEY, newValue)
+    }
+  })
+
+  watch(selectedCluster, (newValue) => {
+    if (newValue) {
+      localStorage.setItem(CLUSTER_STORAGE_KEY, newValue)
     }
   })
 
@@ -45,25 +55,94 @@ export function useTrivyData() {
     localStorage.setItem(CACHE_EXPIRATION_KEY, Date.now() + CACHE_EXPIRATION_TIME)
   }
 
-  async function loadNamespaces() {
+  async function loadClusters() {
     try {
       loading.value = true
       error.value = null
       
-      // Check if we have cached namespaces and if the cache is still valid
-      const cachedNamespaces = localStorage.getItem('trivy-namespaces')
-      if (cachedNamespaces && !isCacheExpired()) {
-        namespaces.value = JSON.parse(cachedNamespaces)
+      // Check if we have cached clusters and if the cache is still valid
+      const cachedClusters = localStorage.getItem('trivy-clusters')
+      if (cachedClusters && !isCacheExpired()) {
+        clusters.value = JSON.parse(cachedClusters).filter(cluster => cluster.enable)
       } else {
         // If no cache or expired, fetch from API
-        namespaces.value = await fetchNamespaces()
+        const allClusters = await fetchClusters()
+        // Filter enabled clusters
+        clusters.value = allClusters.filter(cluster => cluster.enable)
         
-        // Cache the namespaces
-        localStorage.setItem('trivy-namespaces', JSON.stringify(namespaces.value))
+        // Cache the clusters
+        localStorage.setItem('trivy-clusters', JSON.stringify(allClusters))
         updateCacheExpiration()
       }
       
-      // If we have a stored namespace, make sure it exists in the fetched namespaces
+      // If we have a stored cluster, make sure it exists in the fetched clusters
+      if (selectedCluster.value) {
+        const exists = clusters.value.some(cluster => 
+          cluster.name === selectedCluster.value
+        )
+        
+        if (!exists) {
+          // 如果当前选中的集群不存在或已被禁用，则选择第一个可用的集群
+          if (clusters.value.length > 0) {
+            selectedCluster.value = clusters.value[0].name
+          } else {
+            selectedCluster.value = null
+          }
+          
+          // 触发全局事件，通知其他组件当前选中的集群已更改
+          window.dispatchEvent(new CustomEvent('selected-cluster-changed', { 
+            detail: { clusterName: selectedCluster.value } 
+          }))
+        }
+      } else if (clusters.value.length > 0) {
+        selectedCluster.value = clusters.value[0].name
+      }
+    } catch (err) {
+      error.value = `Failed to fetch clusters: ${err.message}`
+      console.error(err)
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function loadNamespaces() {
+    if (!selectedCluster.value) {
+      console.warn('Cannot load namespaces: No cluster selected')
+      namespaces.value = []
+      return
+    }
+    
+    try {
+      loading.value = true
+      error.value = null
+      
+      // 检查选中的集群是否启用
+      const allClusters = JSON.parse(localStorage.getItem('trivy-clusters') || '[]')
+      const selectedClusterData = allClusters.find(c => c.name === selectedCluster.value)
+      
+      if (!selectedClusterData || !selectedClusterData.enable) {
+        error.value = `Cannot load namespaces: Cluster "${selectedCluster.value}" is disabled`
+        namespaces.value = []
+        return
+      }
+      
+      // 直接从 API 获取命名空间，不使用缓存
+      console.log(`Loading namespaces for cluster: ${selectedCluster.value}`)
+      const fetchedNamespaces = await fetchNamespaces(selectedCluster.value)
+      
+      if (!fetchedNamespaces || fetchedNamespaces.length === 0) {
+        console.warn(`No namespaces found for cluster: ${selectedCluster.value}`)
+        namespaces.value = []
+        return
+      }
+      
+      namespaces.value = fetchedNamespaces
+      
+      // 缓存命名空间
+      localStorage.setItem(`trivy-namespaces-${selectedCluster.value}`, JSON.stringify(namespaces.value))
+      updateCacheExpiration()
+      
+      // 如果当前选中的命名空间不存在于新加载的命名空间中，则选择第一个可用的命名空间
       if (selectedNamespace.value) {
         const exists = namespaces.value.some(ns => 
           ns.metadata.name === selectedNamespace.value
@@ -71,34 +150,47 @@ export function useTrivyData() {
         
         if (!exists && namespaces.value.length > 0) {
           selectedNamespace.value = namespaces.value[0].metadata.name
+          console.log(`Selected namespace changed to: ${selectedNamespace.value}`)
         }
       } else if (namespaces.value.length > 0) {
         selectedNamespace.value = namespaces.value[0].metadata.name
+        console.log(`Selected namespace set to: ${selectedNamespace.value}`)
       }
     } catch (err) {
       error.value = `Failed to fetch namespaces: ${err.message}`
-      console.error(err)
+      console.error('Error loading namespaces:', err)
+      namespaces.value = []
     } finally {
       loading.value = false
     }
   }
 
   async function loadVulnerabilityReports() {
-    if (!selectedNamespace.value) return
+    if (!selectedNamespace.value || !selectedCluster.value) return
     
     try {
       loading.value = true
       error.value = null
       
-      const cacheKey = `${REPORTS_CACHE_PREFIX}${selectedNamespace.value}`
+      // 检查选中的集群是否启用
+      const allClusters = JSON.parse(localStorage.getItem('trivy-clusters') || '[]')
+      const selectedClusterData = allClusters.find(c => c.name === selectedCluster.value)
       
-      // Check if we have cached reports for this namespace and if cache is valid
+      if (!selectedClusterData || !selectedClusterData.enable) {
+        error.value = `Cannot load reports: Cluster "${selectedCluster.value}" is disabled`
+        vulnerabilityReports.value = []
+        return
+      }
+      
+      const cacheKey = `${REPORTS_CACHE_PREFIX}${selectedCluster.value}-${selectedNamespace.value}`
+      
+      // Check if we have cached reports for this namespace and cluster and if cache is valid
       const cachedReports = localStorage.getItem(cacheKey)
       if (cachedReports && !isCacheExpired()) {
         vulnerabilityReports.value = JSON.parse(cachedReports)
       } else {
         // If no cache or expired, fetch from API
-        vulnerabilityReports.value = await fetchVulnerabilityReports(selectedNamespace.value)
+        vulnerabilityReports.value = await fetchVulnerabilityReports(selectedNamespace.value, selectedCluster.value)
         
         try {
           // Cache the reports - wrap in try/catch as localStorage might be full
@@ -143,7 +235,18 @@ export function useTrivyData() {
       loading.value = true
       error.value = null
       
-      const cacheKey = `trivy-report-details-${report.metadata.namespace}-${report.metadata.name}`
+      // 检查选中的集群是否启用
+      const allClusters = JSON.parse(localStorage.getItem('trivy-clusters') || '[]')
+      const selectedClusterData = allClusters.find(c => c.name === selectedCluster.value)
+      
+      if (!selectedClusterData || !selectedClusterData.enable) {
+        error.value = `Cannot load report details: Cluster "${selectedCluster.value}" is disabled`
+        reportDetails.value = null
+        showReportDetails.value = false
+        return
+      }
+      
+      const cacheKey = `trivy-report-details-${selectedCluster.value}-${report.metadata.namespace}-${report.metadata.name}`
       
       // Check if we have this report's details cached
       const cachedDetails = localStorage.getItem(cacheKey)
@@ -151,7 +254,7 @@ export function useTrivyData() {
         reportDetails.value = JSON.parse(cachedDetails)
       } else {
         // If not cached or expired, fetch from API
-        reportDetails.value = await fetchReportDetails(report.metadata.namespace, report.metadata.name)
+        reportDetails.value = await fetchReportDetails(report.metadata.namespace, report.metadata.name, selectedCluster.value)
         
         try {
           // Cache the report details
@@ -174,16 +277,20 @@ export function useTrivyData() {
     loading,
     error,
     namespaces,
+    clusters,
     selectedNamespace,
+    selectedCluster,
     namespaceOptions,
     vulnerabilityReports,
     reportDetails,
     showReportDetails,
     loadNamespaces,
+    loadClusters,
     loadVulnerabilityReports,
     loadReportDetails,
     clearCache,
     setSelectedNamespace: (namespace) => { selectedNamespace.value = namespace },
+    setSelectedCluster: (cluster) => { selectedCluster.value = cluster },
     closeReportDetails: () => { showReportDetails.value = false }
   }
 }

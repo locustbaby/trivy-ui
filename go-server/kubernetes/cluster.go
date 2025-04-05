@@ -1,16 +1,19 @@
-// Cluster management functionality for the cache layer
-package cache
+// Package kubernetes handles Kubernetes cluster management
+package kubernetes
 
 import (
 	"encoding/json"
 	"errors"
 	"sync"
+
+	"trivy-ui/cache"
 )
 
 // Cluster represents a Kubernetes cluster configuration
 type Cluster struct {
 	Name       string `json:"name"`
 	KubeConfig string `json:"kubeConfig"`
+	Enable     bool   `json:"enable"`
 }
 
 var (
@@ -30,7 +33,7 @@ func GetClusters() ([]Cluster, error) {
 	defer clustersMutex.RUnlock()
 
 	// Try to get clusters from cache
-	data, found := Store.Get(ClusterKey())
+	data, found := cache.Store.Get(ClusterKey())
 	if !found {
 		// If no clusters found, initialize empty array
 		return []Cluster{}, nil
@@ -62,7 +65,7 @@ func SaveClusters(clusters []Cluster) error {
 	}
 
 	// Store in cache (never expires)
-	Store.Set(ClusterKey(), data, -1)
+	cache.Store.Set(ClusterKey(), data, -1)
 	return nil
 }
 
@@ -136,4 +139,38 @@ func GetCluster(name string) (Cluster, error) {
 	}
 
 	return Cluster{}, ErrClusterNotFound
+}
+
+// UpdateCluster updates an existing cluster in the cache
+func UpdateCluster(cluster Cluster) error {
+	// Validate cluster data
+	if cluster.Name == "" {
+		return errors.New("cluster name cannot be empty")
+	}
+
+	// Get existing clusters
+	clusters, err := GetClusters()
+	if err != nil {
+		return err
+	}
+
+	// Find and update the cluster
+	found := false
+	for i, c := range clusters {
+		if c.Name == cluster.Name {
+			// Only update the Enable field if it's provided
+			if cluster.KubeConfig == "" {
+				cluster.KubeConfig = c.KubeConfig
+			}
+			clusters[i] = cluster
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return ErrClusterNotFound
+	}
+
+	return SaveClusters(clusters)
 }

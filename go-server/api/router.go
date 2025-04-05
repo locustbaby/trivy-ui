@@ -3,6 +3,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"trivy-ui/config"
 )
@@ -40,11 +41,21 @@ func ClustersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ClusterHandler handles the /clusters/{name} endpoint with DELETE method
+// ClusterHandler handles the /clusters/{name} endpoint with DELETE and PUT methods
 func ClusterHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodDelete {
+	// Get cluster name from URL path
+	clusterName := strings.TrimPrefix(r.URL.Path, "/clusters/")
+	if clusterName == "" {
+		http.Error(w, "Cluster name is required", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodDelete:
 		DeleteCluster(w, r)
-	} else {
+	case http.MethodPut:
+		UpdateCluster(w, r)
+	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }

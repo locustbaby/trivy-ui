@@ -1,0 +1,1 @@
+import ClusterManager from '../views/ClusterManager.vue' 

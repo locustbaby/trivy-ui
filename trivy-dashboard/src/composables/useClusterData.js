@@ -1,5 +1,5 @@
 import { ref, computed } from 'vue'
-import { fetchClusters, addCluster, deleteCluster } from '../api/trivy'
+import { fetchClusters, addCluster, deleteCluster, updateCluster as updateClusterApi } from '../api/trivy'
 
 // Storage key constants
 const CLUSTERS_STORAGE_KEY = 'trivy-clusters'
@@ -56,18 +56,25 @@ export function useClusterData() {
       loading.value = true
       error.value = null
       
-      await addCluster(clusterData)
+      const response = await addCluster(clusterData)
       
-      // Reload clusters to get the updated list
+      // 更新本地缓存
+      const cachedClusters = JSON.parse(localStorage.getItem(CLUSTERS_STORAGE_KEY) || '[]')
+      cachedClusters.push(response.data)
+      localStorage.setItem(CLUSTERS_STORAGE_KEY, JSON.stringify(cachedClusters))
+      
+      // 重新加载集群列表
       await loadClusters()
       
-      // Close the modal
-      showAddClusterModal.value = false
+      // 触发全局事件，通知其他组件集群已添加
+      window.dispatchEvent(new CustomEvent('cluster-added', { 
+        detail: { cluster: response.data } 
+      }))
       
       return true
     } catch (err) {
-      error.value = `Failed to add cluster: ${err.message}`
-      console.error(err)
+      error.value = err.message
+      console.error('Failed to create cluster:', err)
       return false
     } finally {
       loading.value = false
@@ -81,13 +88,58 @@ export function useClusterData() {
       
       await deleteCluster(clusterName)
       
-      // Reload clusters to get the updated list
+      // 更新本地缓存
+      const cachedClusters = JSON.parse(localStorage.getItem(CLUSTERS_STORAGE_KEY) || '[]')
+      const updatedClusters = cachedClusters.filter(c => c.name !== clusterName)
+      localStorage.setItem(CLUSTERS_STORAGE_KEY, JSON.stringify(updatedClusters))
+      
+      // 重新加载集群列表
       await loadClusters()
+      
+      // 触发全局事件，通知其他组件集群已被删除
+      window.dispatchEvent(new CustomEvent('cluster-deleted', { 
+        detail: { clusterName } 
+      }))
       
       return true
     } catch (err) {
-      error.value = `Failed to delete cluster: ${err.message}`
-      console.error(err)
+      error.value = err.message
+      console.error('Failed to delete cluster:', err)
+      return false
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function updateCluster(clusterData) {
+    try {
+      loading.value = true
+      error.value = null
+      
+      await updateClusterApi(clusterData)
+      
+      // 更新本地缓存
+      const cachedClusters = JSON.parse(localStorage.getItem(CLUSTERS_STORAGE_KEY) || '[]')
+      const updatedClusters = cachedClusters.map(c => {
+        if (c.name === clusterData.name) {
+          return { ...c, ...clusterData }
+        }
+        return c
+      })
+      localStorage.setItem(CLUSTERS_STORAGE_KEY, JSON.stringify(updatedClusters))
+      
+      // 重新加载集群列表
+      await loadClusters()
+      
+      // 触发全局事件，通知其他组件集群状态已更改
+      window.dispatchEvent(new CustomEvent('cluster-status-changed', { 
+        detail: { clusterName: clusterData.name, enabled: clusterData.enable } 
+      }))
+      
+      return true
+    } catch (err) {
+      error.value = err.message
+      console.error('Failed to update cluster:', err)
       return false
     } finally {
       loading.value = false
@@ -107,6 +159,7 @@ export function useClusterData() {
     loadClusters,
     createCluster,
     removeCluster,
+    updateCluster,
     clearCache,
     openAddClusterModal: () => { showAddClusterModal.value = true },
     closeAddClusterModal: () => { showAddClusterModal.value = false }

@@ -128,10 +128,9 @@ func setupSignalHandler() {
 // Cache key helper functions
 // -------------------------------
 
-// NamespacesKey returns the cache key for namespaces
-// Used to store and retrieve the list of Kubernetes namespaces
-func NamespacesKey() string {
-	return "namespaces"
+// NamespacesKey returns the cache key for storing namespaces
+func NamespacesKey(cluster string) string {
+	return "namespaces_" + cluster
 }
 
 // ReportsKey generates a cache key for vulnerability reports
