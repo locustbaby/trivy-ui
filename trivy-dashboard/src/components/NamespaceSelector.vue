@@ -5,7 +5,8 @@
       :options="options"
       placeholder="Select Namespace"
       style="width: 200px; margin-right: 10px;"
-      @update:value="$emit('update:modelValue', $event)"
+      :disabled="!options.length"
+      @update:value="handleNamespaceChange"
     />
   </div>
 </template>
@@ -27,6 +28,18 @@ export default {
       default: () => []
     }
   },
-  emits: ['update:modelValue']
+  emits: ['update:modelValue'],
+  methods: {
+    handleNamespaceChange(value) {
+      // Emit the update event with the new value
+      this.$emit('update:modelValue', value)
+    }
+  }
 }
 </script>
+
+<style scoped>
+.namespace-selector {
+  display: inline-block;
+}
+</style>

@@ -3,59 +3,64 @@ package api
 
 import (
 	"net/http"
-	"strings"
 
-	"trivy-ui/config"
+	"trivy-ui/data"
 )
 
-// SetupRouter configures all the API routes
-func SetupRouter() *http.ServeMux {
-	mux := http.NewServeMux()
-
-	// API endpoints
-	mux.HandleFunc("/namespaces", FetchNamespaces)
-	mux.HandleFunc("/vulnerability-reports", FetchVulnerabilityReports)
-	mux.HandleFunc("/report-details", FetchReportDetails)
-	mux.HandleFunc("/report-history", FetchReportHistory)
-
-	// Cluster management endpoints
-	mux.HandleFunc("/clusters", ClustersHandler)
-	mux.HandleFunc("/clusters/", ClusterHandler)
-
-	// SPA handler for frontend
-	cfg := config.Get()
-	mux.HandleFunc("/", SpaHandler(cfg.StaticPath))
-
-	return mux
+// Router handles HTTP routing
+type Router struct {
+	mux     *http.ServeMux
+	handler *Handler
 }
 
-// ClustersHandler handles the /clusters endpoint with both GET and POST methods
-func ClustersHandler(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		FetchClusters(w, r)
-	case http.MethodPost:
-		AddCluster(w, r)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+// NewRouter creates a new router
+func NewRouter(repo *data.Repository, clusterRepo *data.ClusterRepository, staticPath string) *Router {
+	r := &Router{
+		mux:     http.NewServeMux(),
+		handler: NewHandler(repo, clusterRepo),
 	}
+	r.Setup(staticPath)
+	return r
 }
 
-// ClusterHandler handles the /clusters/{name} endpoint with DELETE and PUT methods
-func ClusterHandler(w http.ResponseWriter, r *http.Request) {
-	// Get cluster name from URL path
-	clusterName := strings.TrimPrefix(r.URL.Path, "/clusters/")
-	if clusterName == "" {
-		http.Error(w, "Cluster name is required", http.StatusBadRequest)
-		return
-	}
+// Setup configures the router
+func (r *Router) Setup(staticPath string) {
+	// API routes
+	// Report types
+	r.mux.HandleFunc("/api/report-types", r.handler.GetReportTypes)
 
-	switch r.Method {
-	case http.MethodDelete:
-		DeleteCluster(w, r)
-	case http.MethodPut:
-		UpdateCluster(w, r)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
+	// Reports
+	r.mux.HandleFunc("/api/reports", r.handler.GetReports)
+	r.mux.HandleFunc("/api/reports/", r.handler.GetReport)
+
+	// Clusters
+	r.mux.HandleFunc("/api/clusters", func(w http.ResponseWriter, req *http.Request) {
+		switch req.Method {
+		case http.MethodGet:
+			r.handler.GetClusters(w, req)
+		case http.MethodPost:
+			r.handler.SaveCluster(w, req)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	r.mux.HandleFunc("/api/clusters/", func(w http.ResponseWriter, req *http.Request) {
+		switch req.Method {
+		case http.MethodDelete:
+			r.handler.DeleteCluster(w, req)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// Namespaces
+	r.mux.HandleFunc("/api/namespaces", r.handler.GetNamespaces)
+
+	// Serve frontend SPA
+	r.mux.HandleFunc("/", SpaHandler(staticPath))
+}
+
+// ServeHTTP implements the http.Handler interface
+func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.mux.ServeHTTP(w, req)
 }

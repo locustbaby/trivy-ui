@@ -18,7 +18,7 @@ Trivy UI provides a centralized dashboard for viewing vulnerability reports gene
 
 ## Features
 - **Dashboard View**: Overview of vulnerability statistics across namespaces
-- **Detailed Reports**: In-depth analysis of vulnerabilities by severity  
+- **Detailed Reports**: In-depth analysis of vulnerabilities by severity
 - **Search & Filter**: Quickly locate specific vulnerability reports
 - **Caching**: Optimized performance with disk-persistent caching
 - **Responsive Design**: Works on desktop and mobile devices
@@ -41,7 +41,7 @@ trivy-ui/
 
 ## Prerequisites
 - Go 1.19+
-- Node.js 16+ 
+- Node.js 16+
 - Access to a Kubernetes cluster with Trivy Operator installed
 - kubectl configured with appropriate permissions
 
@@ -217,7 +217,7 @@ cd go-server
 go run main.go
 ```
 
-### Frontend (Vue 3)  
+### Frontend (Vue 3)
 For frontend development with hot reload.
 ```shell
 cd trivy-dashboard
@@ -227,9 +227,31 @@ npm run dev
 ## API Endpoints
 - `GET /namespaces`: List all Kubernetes namespaces
 - `GET /vulnerability-reports`: Get vulnerability reports with pagination and filtering
-- `GET /report-details`: Get detailed information about a specific vulnerability report 
+- `GET /report-details`: Get detailed information about a specific vulnerability report
 
 
+## Releases
+
+This project uses GitHub Actions to automatically create releases when a new tag is pushed to the repository. The release includes the source code and release notes generated from commit messages.
+
+### Creating a Release
+
+To create a new release, simply push a tag with the format `vX.Y.Z` (e.g., `v0.1.0`):
+
+```shell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions will automatically create a GitHub release with source code and changelog.
+
+### Docker Images
+
+Docker images are automatically built and pushed to Docker Hub when a new tag is pushed. You can pull a specific version using:
+
+```shell
+docker pull locustbaby/trivy-ui:v0.1.0
+```
 
 ## Contributing
 Contributions are welcome! Please feel free to submit a Pull Request.

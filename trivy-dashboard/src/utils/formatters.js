@@ -23,15 +23,37 @@ export function getVulnerabilityCount(row, severity) {
   // Support multiple data structures
   if (row?.report?.summary) {
     const summary = row.report.summary
-    if (severity === 'CRITICAL') return summary.criticalCount || 0
-    if (severity === 'HIGH') return summary.highCount || 0
-    if (severity === 'MEDIUM') return summary.mediumCount || 0
-    if (severity === 'LOW') return summary.lowCount || 0
+    switch (severity) {
+      case 'CRITICAL': return summary.criticalCount || 0
+      case 'HIGH': return summary.highCount || 0
+      case 'MEDIUM': return summary.mediumCount || 0
+      case 'LOW': return summary.lowCount || 0
+      case 'UNKNOWN': return summary.unknownCount || 0
+      default: return 0
+    }
   }
   
   // Check if vulnerabilities are in report.vulnerabilities array
   if (Array.isArray(row?.report?.vulnerabilities)) {
     return row.report.vulnerabilities.filter(v => v.severity === severity).length
+  }
+  
+  // Check if data is in the nested structure
+  if (row?.data?.report?.summary) {
+    const summary = row.data.report.summary
+    switch (severity) {
+      case 'CRITICAL': return summary.criticalCount || 0
+      case 'HIGH': return summary.highCount || 0
+      case 'MEDIUM': return summary.mediumCount || 0
+      case 'LOW': return summary.lowCount || 0
+      case 'UNKNOWN': return summary.unknownCount || 0
+      default: return 0
+    }
+  }
+  
+  // Check if vulnerabilities are in the nested structure
+  if (Array.isArray(row?.data?.report?.vulnerabilities)) {
+    return row.data.report.vulnerabilities.filter(v => v.severity === severity).length
   }
   
   return 0

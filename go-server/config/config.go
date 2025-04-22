@@ -4,58 +4,48 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
-// Config holds application configuration
+// Config represents the application configuration
 type Config struct {
-	// Server configuration
-	Port  string
-	Debug bool
-
-	// Cache configuration
-	CachePath     string
-	CacheInterval int // in minutes
-
-	// Frontend path
+	Host       string
+	Port       int
+	DataPath   string
 	StaticPath string
 }
 
-// Default configuration values
-var defaultConfig = Config{
-	Port:          "8080",
-	Debug:         false,
-	CachePath:     "trivy-cache.dat",
-	CacheInterval: 2,
-	StaticPath:    "../trivy-dashboard/dist",
-}
+var config *Config
 
 // Get returns the application configuration
-func Get() Config {
-	cfg := defaultConfig
-
-	// Override with environment variables if present
-	if port := os.Getenv("PORT"); port != "" {
-		cfg.Port = port
+func Get() *Config {
+	if config == nil {
+		config = &Config{
+			Host:       getEnv("HOST", "localhost"),
+			Port:       getEnvInt("PORT", 8080),
+			DataPath:   getEnv("DATA_PATH", "."),
+			StaticPath: getEnv("STATIC_PATH", "static"),
+		}
 	}
+	return config
+}
 
-	if debug := os.Getenv("DEBUG"); debug == "true" {
-		cfg.Debug = true
+// Helper functions
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
+	return defaultValue
+}
 
-	if cachePath := os.Getenv("CACHE_PATH"); cachePath != "" {
-		cfg.CachePath = cachePath
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			return intValue
+		}
 	}
-
-	if cacheInterval := os.Getenv("CACHE_INTERVAL"); cacheInterval != "" {
-		// Parse to int and set if valid, otherwise keep default
-		// (skipping error handling for brevity)
-	}
-
-	if staticPath := os.Getenv("STATIC_PATH"); staticPath != "" {
-		cfg.StaticPath = staticPath
-	}
-
-	return cfg
+	return defaultValue
 }
 
 // KubeConfigPath returns the path to the Kubernetes config file
