@@ -21,7 +21,7 @@ var config *Config
 func Get() *Config {
 	if config == nil {
 		config = &Config{
-			Host:       getEnv("HOST", "localhost"),
+			Host:       getEnv("HOST", "0.0.0.0"),
 			Port:       getEnvInt("PORT", 8080),
 			DataPath:   getEnv("DATA_PATH", "."),
 			StaticPath: getEnv("STATIC_PATH", "static"),

@@ -137,7 +137,7 @@ func NewHandler(repo *data.Repository, clusterRepo *data.ClusterRepository) *Han
 		k8s:              k8sClient,
 		refreshLock:      make(map[string]bool),
 		lastRefreshTime:  make(map[string]time.Time),
-		refreshThreshold: 10 * time.Second, // Minimum 10 seconds between refreshes
+		refreshThreshold: 60 * time.Second, // Minimum 1 minute between refreshes
 	}
 }
 
@@ -175,9 +175,11 @@ func (h *Handler) GetReports(w http.ResponseWriter, r *http.Request) {
 	// Define max age for reports (30 minutes)
 	maxAge := 30 * time.Minute
 
-	// Check if data is expired
+	// Check if data is expired or database is empty
 	dataExpired := false
-	if response != nil && len(response.Reports) > 0 {
+	dbEmpty := response == nil || len(response.Reports) == 0
+
+	if !dbEmpty {
 		// Check the first report's age as a sample
 		dataExpired = h.repo.IsReportExpired(response.Reports[0], maxAge)
 	}
@@ -186,7 +188,13 @@ func (h *Handler) GetReports(w http.ResponseWriter, r *http.Request) {
 	requestKey := fmt.Sprintf("%s-%s-%s", reportTypeStr, cluster, namespace)
 
 	// Check if we should refresh data from Kubernetes
-	shouldRefresh := h.shouldRefresh(requestKey, refresh, dataExpired) || err != nil || (response != nil && len(response.Reports) == 0)
+	// Always refresh if database is empty
+	shouldRefresh := h.shouldRefresh(requestKey, refresh, dataExpired) || err != nil || dbEmpty
+
+	// Log the decision for debugging
+	if dbEmpty {
+		fmt.Printf("Database is empty for reports query %s, falling back to Kubernetes\n", requestKey)
+	}
 
 	// If we should refresh, fetch from Kubernetes
 	if shouldRefresh {
@@ -322,8 +330,10 @@ func (h *Handler) GetReport(w http.ResponseWriter, r *http.Request) {
 
 	// Try to get report from database
 	report, err := h.repo.GetReport(config.ReportType(reportTypeStr), cluster, namespace, name)
-	// If report not found, we'll fetch from Kubernetes
-	if err != nil && err.Error() != "report not found" {
+
+	// Check if report not found or other error
+	reportNotFound := err != nil && err.Error() == "report not found"
+	if err != nil && !reportNotFound {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -334,11 +344,20 @@ func (h *Handler) GetReport(w http.ResponseWriter, r *http.Request) {
 	// Check if data is expired
 	dataExpired := h.repo.IsReportExpired(report, maxAge)
 
+	// Check if database is empty for this report
+	dbEmpty := report == nil || reportNotFound
+
 	// Create a unique key for this request
 	requestKey := fmt.Sprintf("%s-%s-%s-%s", reportTypeStr, cluster, namespace, name)
 
 	// Check if we should refresh data from Kubernetes
-	shouldRefresh := h.shouldRefresh(requestKey, refresh, dataExpired) || err != nil || report == nil
+	// Always refresh if database is empty for this report
+	shouldRefresh := h.shouldRefresh(requestKey, refresh, dataExpired) || dbEmpty
+
+	// Log the decision for debugging
+	if dbEmpty {
+		fmt.Printf("Database is empty for report %s, falling back to Kubernetes\n", requestKey)
+	}
 
 	// Fetch from Kubernetes if needed
 	if shouldRefresh {
