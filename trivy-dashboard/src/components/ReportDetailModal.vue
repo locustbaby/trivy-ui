@@ -1,47 +1,75 @@
 <template>
   <n-modal :show="show" @update:show="$emit('update:show', $event)" style="width: 80%">
-    <n-card title="Vulnerability Report Details" :bordered="false" size="huge">
+    <n-card :title="reportTitle" :bordered="false" size="huge">
       <div v-if="report">
         <div class="report-summary">
           <h2>Summary</h2>
           <n-descriptions bordered>
-            <n-descriptions-item label="Name">{{ report.metadata?.name }}</n-descriptions-item>
-            <n-descriptions-item label="Namespace">{{ report.metadata?.namespace }}</n-descriptions-item>
-            <n-descriptions-item label="Created">{{ formatDate(report.metadata?.creationTimestamp) }}</n-descriptions-item>
-            <n-descriptions-item label="Image">{{ formatImage(report.report?.artifact) }}</n-descriptions-item>
-            <n-descriptions-item label="OS">{{ report.report?.os?.name }} ({{ report.report?.os?.family }})</n-descriptions-item>
-            <n-descriptions-item label="Scanner">{{ report.report?.scanner?.name }} {{ report.report?.scanner?.version }}</n-descriptions-item>
+            <!-- Dynamic summary fields based on report type -->
+            <template v-for="field in summaryFields" :key="field.label">
+              <n-descriptions-item :label="field.label">
+                <template v-if="field.type === 'date'">
+                  {{ formatDate(field.value) }}
+                </template>
+                <template v-else-if="field.type === 'image'">
+                  {{ formatImage(field.value) }}
+                </template>
+                <template v-else-if="field.type === 'os' && field.value">
+                  {{ field.value.name }} ({{ field.value.family }})
+                </template>
+                <template v-else-if="field.type === 'scanner' && field.value">
+                  {{ field.value.name }} {{ field.value.version }}
+                </template>
+                <template v-else>
+                  {{ field.value || 'N/A' }}
+                </template>
+              </n-descriptions-item>
+            </template>
           </n-descriptions>
 
-          <h3>Vulnerability Summary</h3>
-          <div class="vuln-summary">
-            <div class="vuln-count critical">
-              <div class="count">{{ report.report?.summary?.criticalCount || 0 }}</div>
-              <div class="label">Critical</div>
+          <!-- Show severity summary for vulnerability and config audit reports -->
+          <template v-if="isVulnerabilityReport() || isConfigAuditReport() || isExposedSecretReport()">
+            <h3>{{ isVulnerabilityReport() ? 'Vulnerability' : isConfigAuditReport() ? 'Config Audit' : 'Exposed Secret' }} Summary</h3>
+            <div class="vuln-summary">
+              <div class="vuln-count critical">
+                <div class="count">{{ report.report?.summary?.criticalCount || 0 }}</div>
+                <div class="label">Critical</div>
+              </div>
+              <div class="vuln-count high">
+                <div class="count">{{ report.report?.summary?.highCount || 0 }}</div>
+                <div class="label">High</div>
+              </div>
+              <div class="vuln-count medium">
+                <div class="count">{{ report.report?.summary?.mediumCount || 0 }}</div>
+                <div class="label">Medium</div>
+              </div>
+              <div class="vuln-count low">
+                <div class="count">{{ report.report?.summary?.lowCount || 0 }}</div>
+                <div class="label">Low</div>
+              </div>
+              <div class="vuln-count unknown">
+                <div class="count">{{ report.report?.summary?.unknownCount || 0 }}</div>
+                <div class="label">Unknown</div>
+              </div>
             </div>
-            <div class="vuln-count high">
-              <div class="count">{{ report.report?.summary?.highCount || 0 }}</div>
-              <div class="label">High</div>
-            </div>
-            <div class="vuln-count medium">
-              <div class="count">{{ report.report?.summary?.mediumCount || 0 }}</div>
-              <div class="label">Medium</div>
-            </div>
-            <div class="vuln-count low">
-              <div class="count">{{ report.report?.summary?.lowCount || 0 }}</div>
-              <div class="label">Low</div>
-            </div>
-            <div class="vuln-count unknown">
-              <div class="count">{{ report.report?.summary?.unknownCount || 0 }}</div>
-              <div class="label">Unknown</div>
-            </div>
-          </div>
+          </template>
         </div>
 
-        <h3>Vulnerabilities</h3>
+        <!-- Dynamic detail section title based on report type -->
+        <h3>
+          {{
+            isVulnerabilityReport() ? 'Vulnerabilities' :
+            isConfigAuditReport() ? 'Config Audit Results' :
+            isExposedSecretReport() ? 'Exposed Secrets' :
+            isSbomReport() ? 'Components' :
+            'Details'
+          }}
+        </h3>
+
+        <!-- Use dynamic columns and data based on report type -->
         <n-data-table
-          :columns="vulnerabilityColumns"
-          :data="report.report?.vulnerabilities || []"
+          :columns="detailColumns"
+          :data="detailItems"
           :pagination="{ pageSize: 10 }"
           :bordered="true"
           striped
@@ -55,14 +83,24 @@
 </template>
 
 <script>
-import { h } from 'vue'
+import { h, computed } from 'vue'
 import { NButton, NModal, NCard, NDataTable, NDescriptions, NDescriptionsItem, NTag } from 'naive-ui'
 import { formatDate, formatImage } from '../utils/formatters'
+import {
+  getReportDetailTitle,
+  getReportDetailColumns,
+  getReportDetailItems,
+  getReportSummaryFields,
+  isVulnerabilityReport,
+  isConfigAuditReport,
+  isExposedSecretReport,
+  isSbomReport
+} from '../utils/reportTypeUtils'
 
 export default {
   components: {
-    NModal, 
-    NCard, 
+    NModal,
+    NCard,
     NButton,
     NDataTable,
     NDescriptions,
@@ -76,10 +114,63 @@ export default {
     report: {
       type: Object,
       default: null
+    },
+    reportType: {
+      type: String,
+      default: 'vulnerabilityreports'
     }
   },
   emits: ['update:show'],
-  setup() {
+  setup(props) {
+    // Get the report title based on report type
+    const reportTitle = computed(() => getReportDetailTitle(props.reportType))
+
+    // Get the detail items based on report type
+    const detailItems = computed(() => getReportDetailItems(props.report, props.reportType))
+
+    // Get the summary fields based on report type
+    const summaryFields = computed(() => getReportSummaryFields(props.report, props.reportType))
+
+    // Define columns based on report type
+    const detailColumns = computed(() => {
+      const columns = getReportDetailColumns(props.reportType)
+
+      // Transform the columns to use h function for rendering
+      return columns.map(column => {
+        if (column.render && column.render.type === 'function') {
+          return column
+        }
+
+        // If the column has a render function that returns an object with type
+        if (column.render) {
+          const originalRender = column.render
+          column.render = (row) => {
+            const result = originalRender(row)
+            if (result.type === 'tag') {
+              const colorMap = {
+                'CRITICAL': 'error',
+                'HIGH': '#ff7800',
+                'MEDIUM': 'warning',
+                'LOW': 'success',
+                'UNKNOWN': 'default'
+              }
+
+              const type = colorMap[result.text] || 'default'
+
+              return h(NTag, { type }, { default: () => result.text })
+            } else if (result.type === 'link') {
+              return h('a', { href: result.link, target: '_blank' }, result.text)
+            } else {
+              return result.text || ''
+            }
+          }
+        }
+
+        return column
+      })
+    })
+
+    // Legacy vulnerability columns for backward compatibility
     const vulnerabilityColumns = [
       {
         title: 'ID',
@@ -98,17 +189,19 @@ export default {
           return severityOrder[a.severity] - severityOrder[b.severity]
         },
         render: (row) => {
-          const color = {
+          const colorMap = {
             'CRITICAL': 'error',
             'HIGH': '#ff7800',
             'MEDIUM': 'warning',
             'LOW': 'success',
             'UNKNOWN': 'default'
-          }[row.severity] || 'default'
-          
+          }
+
+          const type = colorMap[row.severity] || 'default'
+
           return h(
             NTag,
-            { type: 'info', color },
+            { type },
             { default: () => row.severity }
           )
         }
@@ -138,7 +231,15 @@ export default {
     return {
       vulnerabilityColumns,
       formatDate,
-      formatImage
+      formatImage,
+      reportTitle,
+      detailItems,
+      detailColumns,
+      summaryFields,
+      isVulnerabilityReport: () => isVulnerabilityReport(props.reportType),
+      isConfigAuditReport: () => isConfigAuditReport(props.reportType),
+      isExposedSecretReport: () => isExposedSecretReport(props.reportType),
+      isSbomReport: () => isSbomReport(props.reportType)
     }
   }
 }
@@ -154,36 +255,37 @@ export default {
   gap: 15px;
 }
 .vuln-count {
+  text-align: center;
   padding: 10px;
   border-radius: 4px;
   min-width: 80px;
-  text-align: center;
+}
+.vuln-count.critical {
+  background-color: #fff1f0;
+  color: #cf1322;
+}
+.vuln-count.high {
+  background-color: #fff7e6;
+  color: #d46b08;
+}
+.vuln-count.medium {
+  background-color: #e6f7ff;
+  color: #1890ff;
+}
+.vuln-count.low {
+  background-color: #f6ffed;
+  color: #52c41a;
+}
+.vuln-count.unknown {
+  background-color: #f5f5f5;
+  color: #8c8c8c;
 }
 .vuln-count .count {
   font-size: 24px;
   font-weight: bold;
 }
 .vuln-count .label {
-  font-size: 14px;
-}
-.vuln-count.critical {
-  background-color: #ffebee;
-  color: #c62828;
-}
-.vuln-count.high {
-  background-color: #fff3e0;
-  color: #e65100;
-}
-.vuln-count.medium {
-  background-color: #fff8e1;
-  color: #f57f17;
-}
-.vuln-count.low {
-  background-color: #e8f5e9;
-  color: #2e7d32;
-}
-.vuln-count.unknown {
-  background-color: #f5f5f5;
-  color: #616161;
+  font-size: 12px;
+  margin-top: 4px;
 }
 </style>

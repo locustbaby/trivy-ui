@@ -2,10 +2,8 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
-	"io/ioutil"
-	"log"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,232 +11,487 @@ import (
 	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	"trivy-ui/cache"
+	"trivy-ui/config"
+	"trivy-ui/data"
 	"trivy-ui/kubernetes"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// FetchNamespaces handles the /namespaces endpoint
-func FetchNamespaces(w http.ResponseWriter, r *http.Request) {
-	cacheKey := cache.NamespacesKey()
+// Response codes
+const (
+	CodeSuccess = 0
+	CodeError   = 1
+)
+
+// Response represents the standard API response format
+type Response struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// writeJSON writes a JSON response
+func writeJSON(w http.ResponseWriter, code int, resp Response) {
 	w.Header().Set("Content-Type", "application/json")
-
-	// Try to get from cache
-	if cachedData, found := cache.Store.Get(cacheKey); found {
-		w.Header().Set("X-Cache", "HIT")
-		if cachedBytes, ok := cachedData.([]byte); ok {
-			w.Write(cachedBytes)
-			return
-		}
-	}
-	w.Header().Set("X-Cache", "MISS")
-
-	// Fetch from Kubernetes API
-	namespaces, err := kubernetes.Clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Store in cache (namespaces rarely change)
-	responseData, err := json.Marshal(namespaces)
-	if err == nil {
-		cache.Store.Set(cacheKey, responseData, 10*time.Minute)
-	}
-
-	w.Write(responseData)
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(resp)
 }
 
-// FetchVulnerabilityReports handles the /vulnerability-reports endpoint
-func FetchVulnerabilityReports(w http.ResponseWriter, r *http.Request) {
-	namespace := r.URL.Query().Get("namespace")
-	if namespace == "" {
-		namespace = "default"
-	}
-
-	// Add pagination parameters
-	limitStr := r.URL.Query().Get("limit")
-	continueToken := r.URL.Query().Get("continue")
-	search := r.URL.Query().Get("search")
-
-	limit := int64(100) // Default limit
-	if limitStr != "" {
-		if parsedLimit, err := strconv.ParseInt(limitStr, 10, 64); err == nil {
-			limit = parsedLimit
-		}
-	}
-
-	// Generate cache key
-	cacheKey := cache.ReportsKey(namespace, limit, continueToken, search)
-	w.Header().Set("Content-Type", "application/json")
-
-	// Try to get from cache
-	if cachedData, found := cache.Store.Get(cacheKey); found {
-		w.Header().Set("X-Cache", "HIT")
-		if cachedBytes, ok := cachedData.([]byte); ok {
-			w.Write(cachedBytes)
-			return
-		}
-	}
-	w.Header().Set("X-Cache", "MISS")
-
-	// Fetch from Kubernetes API with pagination
-	listOptions := metav1.ListOptions{
-		Limit:    limit,
-		Continue: continueToken,
-	}
-
-	gvr := schema.GroupVersionResource{
-		Group:    "aquasecurity.github.io",
-		Version:  "v1alpha1",
-		Resource: "vulnerabilityreports",
-	}
-
-	reports, err := kubernetes.DynamicClient.Resource(gvr).Namespace(namespace).List(context.TODO(), listOptions)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Apply server-side filtering
-	if search != "" {
-		filteredItems := filterReports(reports.Items, search)
-		reports.Items = filteredItems
-	}
-
-	// Cache and return response
-	responseData, err := json.Marshal(reports)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	cache.Store.Set(cacheKey, responseData, 2*time.Minute)
-	w.Write(responseData)
+// writeError writes an error response
+func writeError(w http.ResponseWriter, code int, message string) {
+	writeJSON(w, code, Response{
+		Code:    CodeError,
+		Message: message,
+	})
 }
 
-// Filter reports by name or container name
-func filterReports(items []unstructured.Unstructured, search string) []unstructured.Unstructured {
-	searchLower := strings.ToLower(search)
-	filtered := []unstructured.Unstructured{}
-
-	for _, item := range items {
-		nameMatches := strings.Contains(strings.ToLower(item.GetName()), searchLower)
-
-		containerName := ""
-		if labels := item.GetLabels(); labels != nil {
-			if name, ok := labels["trivy-operator.container.name"]; ok {
-				containerName = name
-			}
-		}
-		containerMatches := strings.Contains(strings.ToLower(containerName), searchLower)
-
-		if nameMatches || containerMatches {
-			filtered = append(filtered, item)
-		}
+// getIntQueryParam gets an integer query parameter
+func getIntQueryParam(r *http.Request, key string, defaultValue int) int {
+	value := r.URL.Query().Get(key)
+	if value == "" {
+		return defaultValue
 	}
-
-	return filtered
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+	return intValue
 }
 
-// FetchReportDetails handles the /report-details endpoint
-func FetchReportDetails(w http.ResponseWriter, r *http.Request) {
-	namespace := r.URL.Query().Get("namespace")
-	if namespace == "" {
-		namespace = "default"
-	}
-
-	reportName := r.URL.Query().Get("reportName")
-	if reportName == "" {
-		http.Error(w, "reportName is required", http.StatusBadRequest)
-		return
-	}
-
-	// Try to get from cache
-	cacheKey := cache.ReportDetailsKey(namespace, reportName)
-	w.Header().Set("Content-Type", "application/json")
-
-	if cachedData, found := cache.Store.Get(cacheKey); found {
-		w.Header().Set("X-Cache", "HIT")
-		if cachedBytes, ok := cachedData.([]byte); ok {
-			w.Write(cachedBytes)
-			return
+// filterEmptyStrings filters out empty strings from a slice
+func filterEmptyStrings(slice []string) []string {
+	var result []string
+	for _, s := range slice {
+		if s != "" {
+			result = append(result, s)
 		}
 	}
-	w.Header().Set("X-Cache", "MISS")
-
-	// Get from Kubernetes API
-	gvr := schema.GroupVersionResource{
-		Group:    "aquasecurity.github.io",
-		Version:  "v1alpha1",
-		Resource: "vulnerabilityreports",
-	}
-
-	report, err := kubernetes.DynamicClient.Resource(gvr).Namespace(namespace).Get(context.TODO(), reportName, metav1.GetOptions{})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Cache and return response
-	responseData, err := json.Marshal(report)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	cache.Store.Set(cacheKey, responseData, 5*time.Minute)
-	w.Write(responseData)
+	return result
 }
 
-// FetchReportHistory handles the /report-history endpoint
-func FetchReportHistory(w http.ResponseWriter, r *http.Request) {
-	data, err := ioutil.ReadFile("report_history.json")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+// shouldRefresh checks if a refresh operation should be performed
+func (h *Handler) shouldRefresh(key string, forceRefresh bool, dataExpired bool) bool {
+	// If a refresh is already in progress for this key, don't start another one
+	if h.refreshLock[key] {
+		return false
 	}
-	w.Write(data)
-}
 
-// SaveReportHistory persists report data to JSON file
-func SaveReportHistory(report interface{}) {
-	data, err := json.Marshal(report)
-	if err != nil {
-		log.Printf("Error marshalling report: %s", err.Error())
-		return
+	// If force refresh is requested, always refresh
+	if forceRefresh {
+		// But still respect the refresh threshold to prevent abuse
+		lastRefresh, exists := h.lastRefreshTime[key]
+		if exists && time.Since(lastRefresh) < h.refreshThreshold {
+			return false
+		}
+		return true
 	}
-	err = ioutil.WriteFile("report_history.json", data, 0644)
-	if err != nil {
-		log.Printf("Error writing report history: %s", err.Error())
-	}
+
+	// If data is expired, refresh
+	return dataExpired
 }
 
 // SpaHandler serves the Single Page Application frontend
 func SpaHandler(staticPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Skip API endpoints
-		if strings.HasPrefix(r.URL.Path, "/namespaces") ||
-			strings.HasPrefix(r.URL.Path, "/vulnerability-reports") ||
-			strings.HasPrefix(r.URL.Path, "/report-details") ||
-			strings.HasPrefix(r.URL.Path, "/report-history") {
+		// If the request is for an API endpoint, return 404
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
 			return
 		}
 
+		// Try to serve the requested file
 		path := filepath.Join(staticPath, r.URL.Path)
 		_, err := os.Stat(path)
-
-		if os.IsNotExist(err) || r.URL.Path == "/" {
+		if err != nil {
+			// If the file doesn't exist, serve index.html
 			http.ServeFile(w, r, filepath.Join(staticPath, "index.html"))
-			return
-		} else if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		http.FileServer(http.Dir(staticPath)).ServeHTTP(w, r)
+		// Serve the file
+		http.ServeFile(w, r, path)
 	}
+}
+
+// Handler handles API requests
+type Handler struct {
+	repo        *data.Repository
+	clusterRepo *data.ClusterRepository
+	k8s         *kubernetes.Client
+	// Request coalescing to reduce Kubernetes API calls
+	refreshLock      map[string]bool      // Map of in-progress refresh operations
+	lastRefreshTime  map[string]time.Time // Map of last refresh times
+	refreshThreshold time.Duration        // Minimum time between refreshes
+}
+
+// NewHandler creates a new handler
+func NewHandler(repo *data.Repository, clusterRepo *data.ClusterRepository) *Handler {
+	k8sClient, err := kubernetes.NewClient("", repo.GetDB())
+	if err != nil {
+		fmt.Printf("Warning: Failed to create Kubernetes client: %v\n", err)
+	}
+	return &Handler{
+		repo:             repo,
+		clusterRepo:      clusterRepo,
+		k8s:              k8sClient,
+		refreshLock:      make(map[string]bool),
+		lastRefreshTime:  make(map[string]time.Time),
+		refreshThreshold: 10 * time.Second, // Minimum 10 seconds between refreshes
+	}
+}
+
+// GetReportTypes returns all available report types
+func (h *Handler) GetReportTypes(w http.ResponseWriter, r *http.Request) {
+	var reportTypes []string
+	for _, report := range config.AllReports {
+		reportTypes = append(reportTypes, report.Name)
+	}
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    reportTypes,
+	})
+}
+
+// GetReports returns a list of reports based on query parameters
+func (h *Handler) GetReports(w http.ResponseWriter, r *http.Request) {
+	// Get query parameters
+	reportTypeStr := r.URL.Query().Get("type")
+	cluster := r.URL.Query().Get("cluster")
+	namespace := r.URL.Query().Get("namespace")
+	refresh := r.URL.Query().Get("refresh") == "true"
+
+	// Create query
+	query := data.ReportQuery{
+		Type:       config.ReportType(reportTypeStr),
+		Clusters:   []string{cluster},
+		Namespaces: []string{namespace},
+	}
+
+	// Get reports from database first
+	response, err := h.repo.GetReports(query)
+
+	// Define max age for reports (30 minutes)
+	maxAge := 30 * time.Minute
+
+	// Check if data is expired
+	dataExpired := false
+	if response != nil && len(response.Reports) > 0 {
+		// Check the first report's age as a sample
+		dataExpired = h.repo.IsReportExpired(response.Reports[0], maxAge)
+	}
+
+	// Create a unique key for this request
+	requestKey := fmt.Sprintf("%s-%s-%s", reportTypeStr, cluster, namespace)
+
+	// Check if we should refresh data from Kubernetes
+	shouldRefresh := h.shouldRefresh(requestKey, refresh, dataExpired) || err != nil || (response != nil && len(response.Reports) == 0)
+
+	// If we should refresh, fetch from Kubernetes
+	if shouldRefresh {
+		// Set the refresh lock to prevent duplicate requests
+		h.refreshLock[requestKey] = true
+		defer func() {
+			// Release the lock when done
+			h.refreshLock[requestKey] = false
+			// Update the last refresh time
+			h.lastRefreshTime[requestKey] = time.Now()
+		}()
+		// Find the report kind
+		var reportType *config.ReportKind
+		for _, rt := range config.AllReports {
+			if rt.Name == reportTypeStr {
+				reportType = &rt
+				break
+			}
+		}
+
+		if reportType == nil {
+			writeError(w, http.StatusBadRequest, "Invalid report type")
+			return
+		}
+
+		// Get fresh data from Kubernetes for each namespace
+		var allReports []unstructured.Unstructured
+		for _, ns := range query.Namespaces {
+			reports, err := h.k8s.ListReports(r.Context(), *reportType, ns)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			allReports = append(allReports, reports...)
+		}
+
+		// For each report, update the database with complete information
+		for _, report := range allReports {
+			// Extract status and summary information
+			status := "Unknown"
+			summary := map[string]interface{}{
+				"critical": 0,
+				"high":     0,
+				"medium":   0,
+				"low":      0,
+				"unknown":  0,
+			}
+
+			// Extract status from the report
+			if statusObj, ok := report.Object["status"].(map[string]interface{}); ok {
+				if phase, ok := statusObj["phase"].(string); ok {
+					status = phase
+				}
+			}
+
+			// Extract summary information
+			if reportObj, ok := report.Object["report"].(map[string]interface{}); ok {
+				if summaryObj, ok := reportObj["summary"].(map[string]interface{}); ok {
+					if critical, ok := summaryObj["criticalCount"].(float64); ok {
+						summary["critical"] = int(critical)
+					}
+					if high, ok := summaryObj["highCount"].(float64); ok {
+						summary["high"] = int(high)
+					}
+					if medium, ok := summaryObj["mediumCount"].(float64); ok {
+						summary["medium"] = int(medium)
+					}
+					if low, ok := summaryObj["lowCount"].(float64); ok {
+						summary["low"] = int(low)
+					}
+					if unknown, ok := summaryObj["unknownCount"].(float64); ok {
+						summary["unknown"] = int(unknown)
+					}
+				}
+			}
+
+			// Create report structure with complete data
+			reportData := &data.Report{
+				Type:      query.Type,
+				Cluster:   cluster,
+				Namespace: report.GetNamespace(),
+				Name:      report.GetName(),
+				Status:    status,
+				Data: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"name":      report.GetName(),
+						"namespace": report.GetNamespace(),
+						"uid":       report.GetUID(),
+					},
+					"summary": summary,
+					"report":  report.Object["report"],
+				},
+			}
+
+			// Save report information
+			if err := h.repo.SaveReport(reportData); err != nil {
+				fmt.Printf("Error saving report info: %v\n", err)
+				continue
+			}
+		}
+	}
+
+	// If we already fetched from Kubernetes, no need to query the database again
+	if response == nil {
+		// Get reports from database
+		response, err = h.repo.GetReports(query)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    response,
+	})
+}
+
+// GetReport returns a specific report
+func (h *Handler) GetReport(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/reports/"), "/")
+	if len(parts) != 4 {
+		writeError(w, http.StatusBadRequest, "Invalid URL format")
+		return
+	}
+
+	reportTypeStr := parts[0]
+	cluster := parts[1]
+	namespace := parts[2]
+	name := parts[3]
+	refresh := r.URL.Query().Get("refresh") == "true"
+
+	// Try to get report from database
+	report, err := h.repo.GetReport(config.ReportType(reportTypeStr), cluster, namespace, name)
+	// If report not found, we'll fetch from Kubernetes
+	if err != nil && err.Error() != "report not found" {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Define max age for reports (30 minutes)
+	maxAge := 30 * time.Minute
+
+	// Check if data is expired
+	dataExpired := h.repo.IsReportExpired(report, maxAge)
+
+	// Create a unique key for this request
+	requestKey := fmt.Sprintf("%s-%s-%s-%s", reportTypeStr, cluster, namespace, name)
+
+	// Check if we should refresh data from Kubernetes
+	shouldRefresh := h.shouldRefresh(requestKey, refresh, dataExpired) || err != nil || report == nil
+
+	// Fetch from Kubernetes if needed
+	if shouldRefresh {
+		// Set the refresh lock to prevent duplicate requests
+		h.refreshLock[requestKey] = true
+		defer func() {
+			// Release the lock when done
+			h.refreshLock[requestKey] = false
+			// Update the last refresh time
+			h.lastRefreshTime[requestKey] = time.Now()
+		}()
+		// Find the report kind
+		var reportType *config.ReportKind
+		for _, rt := range config.AllReports {
+			if rt.Name == reportTypeStr {
+				reportType = &rt
+				break
+			}
+		}
+
+		if reportType == nil {
+			writeError(w, http.StatusBadRequest, "Invalid report type")
+			return
+		}
+
+		// Get fresh data from Kubernetes
+		k8sReport, err := h.k8s.GetReportDetails(r.Context(), *reportType, namespace, name)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		// If we have both old and new data, compare them
+		if report != nil && k8sReport != nil {
+			oldData, err := json.Marshal(report.Data)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			newData, err := json.Marshal(k8sReport.Data)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+
+			// Only update if data is different
+			if string(oldData) != string(newData) {
+				if err := h.repo.SaveReport(k8sReport); err != nil {
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+		} else if k8sReport != nil {
+			// No old data, save new data
+			if err := h.repo.SaveReport(k8sReport); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		report = k8sReport
+	}
+
+	if report == nil {
+		writeError(w, http.StatusNotFound, "Report not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    report,
+	})
+}
+
+// GetClusters returns all clusters
+func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
+	clusters, err := h.clusterRepo.GetClusters()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    clusters,
+	})
+}
+
+// GetNamespaces returns all namespaces for a cluster
+func (h *Handler) GetNamespaces(w http.ResponseWriter, r *http.Request) {
+	cluster := r.URL.Query().Get("cluster")
+	if cluster == "" {
+		// If no cluster specified, return all namespaces
+		namespaces, err := h.clusterRepo.GetAllNamespaces()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, Response{
+			Code:    CodeSuccess,
+			Message: "Success",
+			Data:    namespaces,
+		})
+		return
+	}
+
+	namespaces, err := h.clusterRepo.GetNamespaces(cluster)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    namespaces,
+	})
+}
+
+// SaveCluster saves a cluster
+func (h *Handler) SaveCluster(w http.ResponseWriter, r *http.Request) {
+	var cluster data.Cluster
+	if err := json.NewDecoder(r.Body).Decode(&cluster); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	err := h.clusterRepo.SaveCluster(&cluster)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    cluster,
+	})
+}
+
+// DeleteCluster deletes a cluster
+func (h *Handler) DeleteCluster(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/clusters/")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "cluster name is required")
+		return
+	}
+
+	err := h.clusterRepo.DeleteCluster(name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+	})
 }
