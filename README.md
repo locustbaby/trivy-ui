@@ -224,33 +224,12 @@ cd trivy-dashboard
 npm run dev
 ```
 
-## API Endpoints
-- `GET /namespaces`: List all Kubernetes namespaces
-- `GET /vulnerability-reports`: Get vulnerability reports with pagination and filtering
-- `GET /report-details`: Get detailed information about a specific vulnerability report
-
-
-## Releases
-
-This project uses GitHub Actions to automatically create releases when a new tag is pushed to the repository. The release includes the source code and release notes generated from commit messages.
-
-### Creating a Release
-
-To create a new release, simply push a tag with the format `vX.Y.Z` (e.g., `v0.1.0`):
-
-```shell
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-GitHub Actions will automatically create a GitHub release with source code and changelog.
-
 ### Docker Images
 
 Docker images are automatically built and pushed to Docker Hub when a new tag is pushed. You can pull a specific version using:
 
 ```shell
-docker pull locustbaby/trivy-ui:v0.1.0
+docker pull locustbaby/trivy-ui:v0.0.1
 ```
 
 ## Contributing
