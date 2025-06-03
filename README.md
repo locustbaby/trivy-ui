@@ -67,7 +67,7 @@ go build
 4. Access the dashboard at http://localhost:8080
 
 ### Run into Kubernetes
-1. Create a ServiceAccount and ClusterRoleBinding
+1. Create a `ClusterRole`, `ServiceAccount` and `ClusterRoleBinding`
 ```shell
 kubectl apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
@@ -78,6 +78,7 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - nodes
   - namespaces
   verbs:
   - get
@@ -107,6 +108,20 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: trivy-ui
+EOF
+
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: trivy-ui
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: trivy-ui
+subjects:
+  - kind: ServiceAccount
+    name: trivy-ui
 EOF
 ```
 
