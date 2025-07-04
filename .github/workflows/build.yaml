@@ -76,13 +76,24 @@ jobs:
             VERSION=${{ env.VERSION }}
 
       - name: Run Trivy Scan (Before Pushing)
+        id: trivy
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}-scan'
-          format: 'table'
+          format: 'json'
+          output: trivy-result.json
           ignore-unfixed: true
-          exit-code: 1 # Fail the job if vulnerabilities are found
+          exit-code: 0
           severity: 'CRITICAL,HIGH'
+
+      - name: Check Trivy Scan Result
+        id: check_trivy
+        run: |
+          if grep -q '"Vulnerabilities":' trivy-result.json && grep -q '"Severity":' trivy-result.json; then
+            echo "found_vuln=true" >> $GITHUB_OUTPUT
+          else
+            echo "found_vuln=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Set Docker tags
         id: docker_meta
@@ -97,6 +108,7 @@ jobs:
 
       - name: Build and Push Multi-Architecture Docker Image
         id: docker_build
+        if: steps.check_trivy.outputs.found_vuln == 'false'
         uses: docker/build-push-action@v5
         with:
           context: .

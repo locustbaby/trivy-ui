@@ -15,56 +15,33 @@ Trivy UI provides a centralized dashboard for viewing vulnerability reports gene
 ![Report Details](./trivy-dashboard/public/report-details.png)
 *In-depth view of individual vulnerability reports*
 
+*Now only support view of vulnerability reports, other reports will fallback to json*
 
-## Features
-- **Dashboard View**: Overview of vulnerability statistics across namespaces
-- **Detailed Reports**: In-depth analysis of vulnerabilities by severity
-- **Search & Filter**: Quickly locate specific vulnerability reports
-- **Caching**: Optimized performance with disk-persistent caching
-- **Responsive Design**: Works on desktop and mobile devices
+---
 
-## Architecture
-The application consists of two main components:
+## Quick Start with Docker Image
 
-- **Frontend**: Vue 3 single-page application with Vite
-- **Backend**: Go server that interfaces with the Kubernetes API
+You can quickly run Trivy UI using the official Docker image:
 
-```
-trivy-ui/
-├── go-server/         # Go backend application
-│   ├── api/           # API handlers
-│   ├── cache/         # Caching functionality
-│   └── kubernetes/    # Kubernetes client interface
-└── my-trivy-dashboard/   # Vue 3 frontend
-    └── src/           # Frontend source code
-```
-
-## Prerequisites
-- Go 1.19+
-- Node.js 16+
-- Access to a Kubernetes cluster with Trivy Operator installed
-- kubectl configured with appropriate permissions
-
-## Installation
-### Build from Source
-1. Clone the repository
 ```shell
-git clone https://github.com/locustbaby/trivy-ui.git
-cd trivy-ui
+docker pull locustbaby/trivy-ui:v0.0.2
+
+docker run -d \
+  -v /path/to/your/kubeconfigs:/kubeconfigs \
+  -e KUBECONFIG_DIR=/kubeconfigs \
+  -p 8080:8080 \
+  locustbaby/trivy-ui:v0.0.2
 ```
-2. Build and run the frontend
-```shell
-cd trivy-dashboard
-npm install
-npm run build
-```
-3. Build and run the backend server
-```shell
-cd ../go-server
-go build
-./go-server
-```
-4. Access the dashboard at http://localhost:8080
+- Replace `/path/to/your/kubeconfigs` with the directory containing your kubeconfig files (one per cluster).
+- Access the dashboard at http://localhost:8080
+
+---
+
+## Run in Kubernetes
+1. Create a ServiceAccount and ClusterRoleBinding (see Trivy Operator docs for details)
+
+
+2. Mount your kubeconfig directory as a volume and deploy the Trivy UI application:
 
 ### Run into Kubernetes
 1. Create a `ClusterRole`, `ServiceAccount` and `ClusterRoleBinding`
@@ -78,7 +55,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - nodes
   - namespaces
   verbs:
   - get
@@ -125,9 +101,7 @@ subjects:
 EOF
 ```
 
-2. Deploy the Trivy UI application
-```shell
-kubectl apply -f - <<EOF
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -144,12 +118,15 @@ spec:
       labels:
         app: trivy-ui
     spec:
+      serviceAccountName: trivy-ui
       containers:
-      - env:
+      - name: trivy-ui
+        image: <image>
+        env:
         - name: STATIC_PATH
           value: trivy-dashboard/dist
-        image: <image>
-        name: trivy-ui
+        - name: KUBECONFIG_DIR
+          value: /kubeconfigs
         ports:
         - containerPort: 8080
           name: http
@@ -159,14 +136,20 @@ spec:
             memory: 64Mi
           requests:
             memory: 64Mi
+        volumeMounts:
+        - name: kubeconfigs
+          mountPath: /kubeconfigs
+      volumes:
+      - name: kubeconfigs
+        secret:
+          secretName: kubeconfigs
       dnsPolicy: ClusterFirst
       restartPolicy: Always
-EOF
 ```
 
-3. Create Ingress and Service
-```shell
-kubectl apply -f - <<EOF
+3. Expose the service:
+
+```yaml
 apiVersion: v1
 kind: Service
 metadata:
@@ -174,20 +157,21 @@ metadata:
     app: trivy-ui
   name: trivy-ui
 spec:
-    ports:
-    - name: http
-      port: 80
-      targetPort: 8080
-    selector:
-      app: trivy-ui
-    type: ClusterIP
-EOF
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  selector:
+    app: trivy-ui
+  type: ClusterIP
+```
 
-kubectl apply -f - <<EOF
+4. (Optional) Create an Ingress:
+
+```yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  annotations:
   labels:
     app: trivy-ui
   name: trivy-ui
@@ -197,36 +181,85 @@ spec:
   - host: trivy-ui.example.com
     http:
       paths:
-      - backend:
+      - path: /
+        pathType: Prefix
+        backend:
           service:
             name: trivy-ui
             port:
-              number: 8080
-        path: /
-        pathType: Prefix
+              number: 80
   tls:
   - hosts:
     - trivy-ui.example.com
     secretName: trivy-ui-tls
-EOF
 ```
+
+---
+
+## Features
+- **Multi-Cluster Support**: Manage and view reports from multiple Kubernetes clusters by mounting a directory of kubeconfig files
+- **Dashboard View**: Overview of vulnerability statistics across namespaces and clusters
+- **Detailed Reports**: In-depth analysis of vulnerabilities by severity
+- **Search & Filter**: Quickly locate specific vulnerability reports
+- **Caching**: Optimized performance with disk-persistent caching
+- **Responsive Design**: Works on desktop and mobile devices
+
+## Architecture
+The application consists of two main components:
+
+- **Frontend**: Vue 3 single-page application with Vite
+- **Backend**: Go server that interfaces with the Kubernetes API (multi-cluster via kubeconfig directory)
+
+```
+trivy-ui/
+├── go-server/         # Go backend application
+│   ├── api/           # API handlers
+│   └── kubernetes/    # Kubernetes client interface
+└── trivy-dashboard/   # Vue 3 frontend
+    └── src/           # Frontend source code
+```
+
+## Prerequisites
+- Go 1.24+
+- Node.js 16+
+- Access to one or more Kubernetes clusters with Trivy Operator installed
+- Each cluster's kubeconfig file (see below)
+
+### Build from Source
+1. Clone the repository
+```shell
+git clone https://github.com/locustbaby/trivy-ui.git
+cd trivy-ui
+```
+2. Build and run the frontend
+```shell
+cd trivy-dashboard
+npm install
+npm run build
+```
+3. Build and run the backend server
+```shell
+cd ../go-server
+go build
+./go-server
+```
+4. Access the dashboard at http://localhost:8080
+
 
 ## Environment Variables
 The server can be configured using the following environment variables:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| PORT | HTTP port to listen on | 8080 |
-| DEBUG | Enable debug logging | false |
-| CACHE_PATH | Path to save cache data | trivy-cache.dat |
-| CACHE_INTERVAL | How often to save cache to disk in minutes | 2 |
-| STATIC_PATH | Path to static frontend assets | ../trivy-dashboard/dist |
-| KUBECONFIG | Path to Kubernetes config file | ~/.kube/config |
+| Variable         | Description                                 | Default           |
+|------------------|---------------------------------------------|-------------------|
+| PORT             | HTTP port to listen on                      | 8080              |
+| DEBUG            | Enable debug logging                        | false             |
+| STATIC_PATH      | Path to static frontend assets              | ../trivy-dashboard/dist |
+| KUBECONFIG_DIR   | Directory containing kubeconfig files       | /kubeconfigs      |
 
 ## Development
 
 ### Backend (Go)
-The backend server provides APIs for accessing Trivy vulnerability reports from Kubernetes.
+The backend server provides APIs for accessing Trivy vulnerability reports from multiple Kubernetes clusters.
 ```shell
 cd go-server
 go run main.go
@@ -237,14 +270,6 @@ For frontend development with hot reload.
 ```shell
 cd trivy-dashboard
 npm run dev
-```
-
-### Docker Images
-
-Docker images are automatically built and pushed to Docker Hub when a new tag is pushed. You can pull a specific version using:
-
-```shell
-docker pull locustbaby/trivy-ui:v0.0.1
 ```
 
 ## Contributing

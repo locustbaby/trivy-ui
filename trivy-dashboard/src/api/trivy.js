@@ -44,15 +44,13 @@ export async function fetchNamespaces(cluster) {
   if (!cluster) return []
   console.log('API: Fetching namespaces for cluster:', cluster)
   try {
-    const response = await axios.get(`${apiBaseUrl}/api/namespaces`, {
-      params: { cluster }
-    })
+    const response = await axios.get(`${apiBaseUrl}/api/clusters/${cluster}/namespaces`)
     console.log('API: Namespaces response:', response.data)
 
     // Extract namespace names from the response
     if (Array.isArray(response.data.data)) {
       // Map the namespace objects to just their names
-      const namespaceNames = response.data.data.map(ns => ns.name)
+      const namespaceNames = response.data.data.map(ns => ns.name || ns)
       console.log('API: Extracted namespace names:', namespaceNames)
       return namespaceNames
     }
@@ -69,22 +67,18 @@ export async function fetchReportTypes() {
   return response.data.data || []
 }
 
-export async function fetchVulnerabilityReports(cluster, namespace, reportType = 'vulnerabilityreports') {
-  if (!namespace || !cluster) return []
-  const response = await axios.get(`${apiBaseUrl}/api/reports`, {
-    params: {
-      type: reportType,
-      cluster,
-      namespace
-    }
-  })
-  return response.data.data.items || []
+export async function fetchReports(type, cluster, namespace, refresh = false) {
+  if (!type || !cluster || !namespace) return []
+  const params = refresh ? { refresh: 1 } : {}
+  const response = await axios.get(`${apiBaseUrl}/api/reports/${type}/${cluster}/${namespace}`, { params })
+  // The backend returns an array of reports in data
+  return response.data.data || []
 }
 
-export async function fetchReportDetails(reportType, cluster, namespace, reportName) {
-  if (!namespace || !reportName || !cluster) return null
-  const response = await axios.get(`${apiBaseUrl}/api/reports/${reportType}/${cluster}/${namespace}/${reportName}`)
-  return response.data
+export async function fetchReportDetails(type, cluster, namespace, name) {
+  if (!type || !cluster || !namespace || !name) return null
+  const response = await axios.get(`${apiBaseUrl}/api/reports/${type}/${cluster}/${namespace}/${name}`)
+  return response.data.data || null
 }
 
 export async function fetchClusters() {
@@ -152,41 +146,5 @@ export async function createCluster(clusterData) {
       // 请求设置时发生错误
       throw new Error(`Request error: ${error.message}`)
     }
-  }
-}
-
-export async function fetchReports(reportType, cluster, namespace, refresh = false) {
-  console.log('API: Fetching reports for type:', reportType, 'cluster:', cluster, 'namespace:', namespace, 'refresh:', refresh)
-  if (!cluster || !namespace) {
-    console.warn('API: Missing cluster or namespace, cannot fetch reports')
-    return { data: { reports: [] } }
-  }
-
-  try {
-    const response = await axios.get(`${apiBaseUrl}/api/reports`, {
-      params: {
-        type: reportType,
-        cluster,
-        namespace,
-        refresh
-      }
-    })
-    console.log('API: Reports response:', response.data)
-
-    // Ensure we return the correct data structure
-    if (response.data && response.data.data) {
-      return {
-        data: {
-          reports: Array.isArray(response.data.data.reports) ? response.data.data.reports : [],
-          total: response.data.data.total || 0,
-          page: response.data.data.page || 1,
-          pages: response.data.data.pages || 1
-        }
-      }
-    }
-    return { data: { reports: [] } }
-  } catch (error) {
-    console.error('API: Error fetching reports:', error)
-    throw error
   }
 }
