@@ -40,7 +40,66 @@ docker run -d \
 ## Run in Kubernetes
 1. Create a ServiceAccount and ClusterRoleBinding (see Trivy Operator docs for details)
 
+
 2. Mount your kubeconfig directory as a volume and deploy the Trivy UI application:
+
+### Run into Kubernetes
+1. Create a `ClusterRole`, `ServiceAccount` and `ClusterRoleBinding`
+```shell
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: trivy-ui
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - aquasecurity.github.io
+  resources:
+  - clustercompliancereports
+  - clusterconfigauditreports
+  - clusterinfraassessmentreports
+  - clusterrbacassessmentreports
+  - clustersbomreports
+  - clustervulnerabilityreports
+  - configauditreports
+  - exposedsecretreports
+  - infraassessmentreports
+  - rbacassessmentreports
+  - sbomreports
+  - vulnerabilityreports
+  verbs:
+  - get
+  - list
+EOF
+
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trivy-ui
+EOF
+
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: trivy-ui
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: trivy-ui
+subjects:
+  - kind: ServiceAccount
+    name: trivy-ui
+EOF
+```
 
 ```yaml
 apiVersion: apps/v1
