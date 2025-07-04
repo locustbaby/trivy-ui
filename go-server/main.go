@@ -2,17 +2,23 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/rs/cors"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"trivy-ui/api"
 	"trivy-ui/config"
-	"trivy-ui/data"
+	_ "trivy-ui/docs" // swaggo 文档自动注册
+	"trivy-ui/kubernetes"
+
+	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 func main() {
@@ -23,66 +29,163 @@ func main() {
 	fmt.Println("Configuration loaded")
 	cfg := config.Get()
 
-	// Create data directory
-	dataDir := filepath.Join(os.TempDir(), "trivy-ui", "data")
-	fmt.Printf("Creating data directory at %s\n", dataDir)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		log.Fatalf("Failed to create data directory: %v", err)
+	// 启动时加载本地缓存
+	api.LoadCache()
+
+	// 多集群 client map
+	clients := make(map[string]*kubernetes.Client)
+
+	// 支持通过目录批量加载 kubeconfig
+	kubeconfigDir := os.Getenv("KUBECONFIG_DIR")
+	if kubeconfigDir == "" {
+		kubeconfigDir = os.Getenv("KUBECONFIGDIR") // 兼容另一种写法
+	}
+	if kubeconfigDir == "" {
+		kubeconfigDir = os.Getenv("KUBE_CONFIG_DIR") // 兼容另一种写法
+	}
+	if kubeconfigDir != "" {
+		if _, err := os.ReadDir(kubeconfigDir); err != nil {
+			fmt.Printf("Info: kubeconfig dir %s not found, fallback to single kubeconfig/incluster mode\n", kubeconfigDir)
+			kubeconfigDir = ""
+		}
 	}
 
-	// Initialize database
-	dbPath := filepath.Join(dataDir, "trivy.db")
-	fmt.Printf("Initializing database at %s\n", dbPath)
-	db, err := data.NewDB(dbPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+	var clustersToInit []struct {
+		Name       string
+		Kubeconfig string
 	}
-	defer db.Close()
-	fmt.Println("Database initialized successfully")
 
-	// Initialize repositories
-	repo := data.NewRepository(db)
-	clusterRepo := data.NewClusterRepository(db)
-	fmt.Println("Repositories initialized")
+	if kubeconfigDir != "" {
+		files, _ := os.ReadDir(kubeconfigDir)
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			if strings.HasPrefix(file.Name(), ".") {
+				continue
+			}
+			path := filepath.Join(kubeconfigDir, file.Name())
+			rawConfig, err := clientcmd.LoadFromFile(path)
+			if err != nil {
+				fmt.Printf("Info: Skipping %s: %v\n", file.Name(), err)
+				continue
+			}
+			clusterName := ""
+			for name := range rawConfig.Clusters {
+				clusterName = name
+				break // 只取第一个
+			}
+			if clusterName == "" {
+				fmt.Printf("Info: No cluster found in %s\n", file.Name())
+				continue
+			}
+			k8sClient, err := kubernetes.NewClient(path)
+			if err != nil {
+				fmt.Printf("Info: Skipping %s: %v\n", file.Name(), err)
+				continue
+			}
+			clustersToInit = append(clustersToInit, struct{ Name, Kubeconfig string }{clusterName, path})
+			clients[clusterName] = k8sClient
+		}
+	} else {
+		// 兼容原有单 kubeconfig 逻辑
+		if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+			clustersToInit = append(clustersToInit, struct{ Name, Kubeconfig string }{"incluster", ""})
+		}
+		kubeconfig := os.Getenv("KUBECONFIG")
+		if kubeconfig == "" {
+			home := os.Getenv("HOME")
+			kubeconfig = filepath.Join(home, ".kube", "config")
+		}
+		if _, err := os.Stat(kubeconfig); err == nil {
+			if rawConfig, err := clientcmd.LoadFromFile(kubeconfig); err == nil {
+				clusterName := ""
+				for name := range rawConfig.Clusters {
+					clusterName = name
+					break
+				}
+				if clusterName != "" {
+					clustersToInit = append(clustersToInit, struct{ Name, Kubeconfig string }{clusterName, kubeconfig})
+				}
+			}
+		}
+	}
 
-	// Create router using the API package
-	fmt.Println("Creating router")
+	for _, c := range clustersToInit {
+		k8sClient, err := kubernetes.NewClient(c.Kubeconfig)
+		if err != nil {
+			fmt.Printf("Warning: Failed to create Kubernetes client for %s: %v\n", c.Name, err)
+			continue
+		}
+		clients[c.Name] = k8sClient
+		// 获取 API Server 地址和 Kubernetes 版本（类似 kubectl cluster-info）
+		restConfig, _ := clientcmd.BuildConfigFromFlags("", c.Kubeconfig)
+		apiServerURL := ""
+		if restConfig != nil {
+			apiServerURL = restConfig.Host
+		}
+		version := ""
+		if versionInfo, err := k8sClient.Clientset().Discovery().ServerVersion(); err == nil {
+			version = versionInfo.GitVersion
+		}
+		clusterInfo := api.Cluster{
+			Name:        c.Name,
+			Description: fmt.Sprintf("API Server: %s, version: %s", apiServerURL, version),
+		}
+		api.UpsertClusterToCache(clusterInfo)
+		// 获取所有 ns
+		nsList, err := k8sClient.GetNamespaces(context.Background())
+		if err == nil {
+			for _, ns := range nsList {
+				nsObj := api.Namespace{Cluster: c.Name, Name: ns}
+				api.UpsertNamespaceToCache(nsObj)
+			}
+		}
+	}
+
+	// 赋值给全局 clients map
+	api.Clients = clients
 
 	// Check for static files in different locations
 	staticPath := os.Getenv("STATIC_PATH")
 	if staticPath == "" {
-		// Try common locations for static files
 		possiblePaths := []string{
-			"trivy-dashboard/dist",      // Local development path
-			"../trivy-dashboard/dist",   // Running from go-server directory
-			"/app/trivy-dashboard/dist", // Docker container path
-			"web/dist",                  // Original path
+			"trivy-dashboard/dist",
+			"../trivy-dashboard/dist",
+			"/app/trivy-dashboard/dist",
+			"web/dist",
 		}
-
 		for _, path := range possiblePaths {
 			if _, err := os.Stat(path); err == nil {
 				staticPath = path
 				break
 			}
 		}
-
-		// If no path found, use the default
 		if staticPath == "" {
 			staticPath = "trivy-dashboard/dist"
 			fmt.Printf("Warning: Static files not found, using default path: %s\n", staticPath)
 		}
 	}
-
-	// Verify that index.html exists in the static path
 	indexPath := filepath.Join(staticPath, "index.html")
 	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
 		fmt.Printf("Warning: index.html not found at %s\n", indexPath)
 	} else {
 		fmt.Printf("Found index.html at %s\n", indexPath)
 	}
-
 	fmt.Printf("Using static files from: %s\n", staticPath)
-	router := api.NewRouter(repo, clusterRepo, staticPath)
+
+	// 只用第一个 client 启动 API 路由（如需多集群切换可扩展）
+	var firstClient *kubernetes.Client
+	for _, c := range clustersToInit {
+		if client, ok := clients[c.Name]; ok {
+			firstClient = client
+			break
+		}
+	}
+	if firstClient == nil {
+		log.Fatalf("No Kubernetes client initialized!")
+	}
+	router := api.NewRouter(firstClient, staticPath)
 	fmt.Println("Router created")
 
 	// Setup CORS
@@ -106,6 +209,9 @@ func main() {
 		MaxAge:           300,
 	})
 	fmt.Println("CORS handler created")
+
+	// 注册 swagger 文档路由
+	http.Handle("/swagger/", http.StripPrefix("/swagger/", httpSwagger.WrapHandler))
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)

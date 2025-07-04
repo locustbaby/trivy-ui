@@ -1,0 +1,154 @@
+definitions:
+  api.Response:
+    properties:
+      code:
+        type: integer
+      data: {}
+      message:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /api/clusters:
+    get:
+      description: Returns all clusters (from cache or k8s)
+      parameters:
+      - description: Force refresh from k8s if 1
+        in: query
+        name: refresh
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get all clusters
+      tags:
+      - clusters
+  /api/clusters/{cluster}/namespaces:
+    get:
+      description: Returns all namespaces for a specific cluster (from cache or k8s)
+      parameters:
+      - description: Cluster name
+        in: path
+        name: cluster
+        required: true
+        type: string
+      - description: Force refresh from k8s if 1
+        in: query
+        name: refresh
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get namespaces by cluster
+      tags:
+      - namespaces
+  /api/report-types:
+    get:
+      description: Returns all available Trivy report types
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get all report types
+      tags:
+      - reports
+  /api/reports/{type}/{cluster}/{namespace}:
+    get:
+      description: Returns all reports for a specific type, cluster, and namespace
+      parameters:
+      - description: Report type
+        in: path
+        name: type
+        required: true
+        type: string
+      - description: Cluster name
+        in: path
+        name: cluster
+        required: true
+        type: string
+      - description: Namespace
+        in: path
+        name: namespace
+        required: true
+        type: string
+      - description: Force refresh from k8s if 1
+        in: query
+        name: refresh
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: List reports by type and namespace
+      tags:
+      - reports
+  /api/reports/{type}/{cluster}/{namespace}/{name}:
+    get:
+      description: Returns a specific report by type, cluster, namespace, and name
+      parameters:
+      - description: Report type
+        in: path
+        name: type
+        required: true
+        type: string
+      - description: Cluster name
+        in: path
+        name: cluster
+        required: true
+        type: string
+      - description: Namespace
+        in: path
+        name: namespace
+        required: true
+        type: string
+      - description: Report name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Force refresh from k8s if 1
+        in: query
+        name: refresh
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: Get a specific report
+      tags:
+      - reports
+swagger: "2.0"

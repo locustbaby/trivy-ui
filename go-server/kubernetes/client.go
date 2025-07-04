@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,7 +18,6 @@ import (
 	"k8s.io/client-go/util/homedir"
 
 	"trivy-ui/config"
-	"trivy-ui/data"
 )
 
 // Client represents a Kubernetes client
@@ -25,24 +25,36 @@ type Client struct {
 	clientset *kubernetes.Clientset
 	dynamic   dynamic.Interface
 	config    *rest.Config
-	db        *data.DB
 }
 
 // NewClient creates a new Kubernetes client
-func NewClient(kubeconfig string, db *data.DB) (*Client, error) {
+func NewClient(kubeconfig string) (*Client, error) {
 	var config *rest.Config
 	var err error
+	var clusterName string
+	var contextName string
 
-	// Check if running in cluster
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		config, err = rest.InClusterConfig()
+		clusterName = "incluster"
 	} else {
-		// If kubeconfig is not provided, try to use the default one
 		if kubeconfig == "" {
 			home := homedir.HomeDir()
 			kubeconfig = filepath.Join(home, ".kube", "config")
 		}
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err == nil {
+			// 获取context名
+			if rawConfig, err2 := clientcmd.LoadFromFile(kubeconfig); err2 == nil {
+				contextName = rawConfig.CurrentContext
+				if contextName != "" {
+					clusterName = contextName
+				}
+			}
+		}
+		if clusterName == "" {
+			clusterName = "default"
+		}
 	}
 
 	if err != nil {
@@ -53,53 +65,16 @@ func NewClient(kubeconfig string, db *data.DB) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get cluster information
-	clusterInfo, err := clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cluster information: %w", err)
-	}
-
-	// Create cluster description
-	clusterDesc := fmt.Sprintf("Kubernetes cluster with %d nodes", len(clusterInfo.Items))
-	if len(clusterInfo.Items) > 0 {
-		clusterDesc += fmt.Sprintf(", version: %s", clusterInfo.Items[0].Status.NodeInfo.KubeletVersion)
-	}
-
-	// Store cluster information in database
-	clusterRepo := data.NewClusterRepository(db)
-	if err := clusterRepo.SaveCluster(&data.Cluster{
-		Name:        "default",
-		Description: clusterDesc,
-	}); err != nil {
-		return nil, fmt.Errorf("failed to save cluster information: %w", err)
-	}
-
-	// Get and save namespaces
-	namespaces, err := clientset.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get namespaces: %w", err)
-	}
-
-	for _, ns := range namespaces.Items {
-		if err := clusterRepo.SaveNamespace(&data.Namespace{
-			Cluster: "default",
-			Name:    ns.Name,
-		}); err != nil {
-			return nil, fmt.Errorf("failed to save namespace %s: %w", ns.Name, err)
-		}
-	}
-
+	// 只初始化 client，不再写入 DB
 	return &Client{
 		clientset: clientset,
 		dynamic:   dynamicClient,
 		config:    config,
-		db:        db,
 	}, nil
 }
 
@@ -151,9 +126,19 @@ func (c *Client) ListReports(ctx context.Context, reportType config.ReportKind, 
 	return list.Items, nil
 }
 
+// Report is a local struct for report data (替代 data.Report)
+type Report struct {
+	Type      string      `json:"type"`
+	Cluster   string      `json:"cluster"`
+	Namespace string      `json:"namespace"`
+	Name      string      `json:"name"`
+	Status    string      `json:"status,omitempty"`
+	Data      interface{} `json:"data"`
+}
+
 // GetReportsByType returns reports of a specific type in the namespace
-func (c *Client) GetReportsByType(ctx context.Context, reportType config.ReportKind, namespace string) ([]data.Report, error) {
-	var reports []data.Report
+func (c *Client) GetReportsByType(ctx context.Context, reportType config.ReportKind, namespace string) ([]Report, error) {
+	var reports []Report
 
 	// List reports of this type
 	items, err := c.ListReports(ctx, reportType, namespace)
@@ -161,56 +146,84 @@ func (c *Client) GetReportsByType(ctx context.Context, reportType config.ReportK
 		return nil, err
 	}
 
-	// Create basic report objects without fetching details
 	for _, item := range items {
-		// Extract status from the report if available
-		status := "Unknown"
-		if statusObj, ok := item.Object["status"].(map[string]interface{}); ok {
-			if phase, ok := statusObj["phase"].(string); ok {
-				status = phase
+		meta := map[string]interface{}{
+			"name":      item.GetName(),
+			"namespace": item.GetNamespace(),
+			"uid":       item.GetUID(),
+		}
+		summary := map[string]interface{}{}
+		repository := ""
+		tag := ""
+		scanner := ""
+		age := ""
+		// Try to extract summary fields
+		if reportObj, found, _ := unstructured.NestedMap(item.Object, "report"); found {
+			if sum, found, _ := unstructured.NestedMap(reportObj, "summary"); found {
+				for k, v := range sum {
+					summary[k] = v
+				}
+			}
+			if art, found, _ := unstructured.NestedMap(reportObj, "artifact"); found {
+				if repo, found, _ := unstructured.NestedString(art, "repository"); found {
+					repository = repo
+				}
+				if t, found, _ := unstructured.NestedString(art, "tag"); found {
+					tag = t
+				}
+			}
+			if sc, found, _ := unstructured.NestedMap(reportObj, "scanner"); found {
+				if s, found, _ := unstructured.NestedString(sc, "name"); found {
+					scanner = s
+				}
+			}
+			if created, found, _ := unstructured.NestedString(item.Object, "metadata", "creationTimestamp"); found {
+				if t, err := time.Parse(time.RFC3339, created); err == nil {
+					dur := time.Since(t)
+					if dur.Hours() >= 24 {
+						age = fmt.Sprintf("%dh", int(dur.Hours()))
+					} else if dur.Hours() >= 1 {
+						age = fmt.Sprintf("%dh", int(dur.Hours()))
+					} else {
+						age = fmt.Sprintf("%dm", int(dur.Minutes()))
+					}
+				}
 			}
 		}
-
-		report := data.Report{
-			Type:      config.ReportType(reportType.Name),
-			Cluster:   "default", // TODO: Get actual cluster name
+		dataMap := map[string]interface{}{
+			"meta":       meta,
+			"summary":    summary,
+			"repository": repository,
+			"tag":        tag,
+			"scanner":    scanner,
+			"age":        age,
+		}
+		reports = append(reports, Report{
+			Type:      reportType.Name,
+			Cluster:   "default", // TODO: set actual cluster name if available
 			Namespace: item.GetNamespace(),
 			Name:      item.GetName(),
-			Status:    status,
-			// Don't include full data to save resources
-			Data: map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"name":      item.GetName(),
-					"namespace": item.GetNamespace(),
-					"uid":       item.GetUID(),
-				},
-			},
-		}
-		reports = append(reports, report)
+			Status:    "",
+			Data:      dataMap,
+		})
 	}
 
 	return reports, nil
 }
 
 // GetReportDetails retrieves detailed information about a specific report
-func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportKind, namespace, name string) (*data.Report, error) {
-	// Create dynamic client for the report type
+func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportKind, namespace, name string) (*Report, error) {
 	gvr := schema.GroupVersionResource{
 		Group:    "aquasecurity.github.io",
 		Version:  "v1alpha1",
 		Resource: reportType.Name,
 	}
 
-	// Get the report from Kubernetes
 	report, err := c.dynamic.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get report from Kubernetes: %v", err)
 	}
 
-	// Log the report data for debugging
-	fmt.Printf("Report from Kubernetes: %+v\n", report)
-
-	// Extract status from the report
 	status := "Unknown"
 	if summary, ok := report.Object["report"].(map[string]interface{}); ok {
 		if summaryData, ok := summary["summary"].(map[string]interface{}); ok {
@@ -228,31 +241,19 @@ func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportK
 		}
 	}
 
-	// Create report object with complete data
-	reportObj := &data.Report{
-		Type:      config.ReportType(reportType.Name),
+	return &Report{
+		Type:      reportType.Name,
 		Cluster:   "default",
 		Namespace: namespace,
 		Name:      name,
 		Status:    status,
-		Data:      report.Object, // Save the complete report data
-	}
-
-	// Log the report object for debugging
-	fmt.Printf("Returning report: %+v\n", reportObj)
-
-	// Save report to database
-	repo := data.NewRepository(c.db)
-	if err := repo.SaveReport(reportObj); err != nil {
-		return nil, fmt.Errorf("failed to save report: %v", err)
-	}
-
-	return reportObj, nil
+		Data:      report.Object,
+	}, nil
 }
 
 // GetReports returns all reports in the specified namespace
-func (c *Client) GetReports(ctx context.Context, namespace string) ([]data.Report, error) {
-	var reports []data.Report
+func (c *Client) GetReports(ctx context.Context, namespace string) ([]Report, error) {
+	var reports []Report
 
 	// Get all report types from config
 	for _, reportType := range config.AllReports {
@@ -265,4 +266,8 @@ func (c *Client) GetReports(ctx context.Context, namespace string) ([]data.Repor
 	}
 
 	return reports, nil
+}
+
+func (c *Client) Clientset() *kubernetes.Clientset {
+	return c.clientset
 }

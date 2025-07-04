@@ -24,3 +24,5 @@ dist-ssr
 *.sw?
 *.dat
 *.db
+*/cache.json
+.cursorignore
