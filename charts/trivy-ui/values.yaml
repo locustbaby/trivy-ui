@@ -1,0 +1,105 @@
+# Default values for trivy-ui.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: locustbaby/trivy-ui
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "v0.0.2"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: trivy-ui.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: trivy-ui-tls
+  #    hosts:
+  #      - trivy-ui.example.com
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Environment variables
+env:
+  # KUBECONFIG_DIR: Directory containing kubeconfig files
+  KUBECONFIG_DIR: "/kubeconfigs"
+  # STATIC_PATH: Path to static frontend assets
+  STATIC_PATH: "trivy-dashboard/dist"
+  # DEBUG: Enable debug logging
+  DEBUG: "false"
+
+# Kubeconfig secret configuration
+kubeconfigs:
+  # Secret name containing kubeconfig files
+  secretName: "kubeconfigs"
+  # Whether to create the secret (if false, you need to create it manually)
+  create: true
+  # Default kubeconfig data (base64 encoded)
+  # You should replace this with your actual kubeconfig files
+  data: {}
+    # cluster1: <base64-encoded-kubeconfig1>
+    # cluster2: <base64-encoded-kubeconfig2>
+
+# RBAC configuration
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+  # ClusterRole and ClusterRoleBinding will be created if this is true

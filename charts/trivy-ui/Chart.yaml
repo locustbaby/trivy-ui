@@ -1,0 +1,18 @@
+apiVersion: v2
+name: trivy-ui
+description: A web-based UI for visualizing and managing Trivy vulnerability scan results in Kubernetes clusters
+type: application
+version: 0.1.0
+appVersion: "v0.0.2"
+keywords:
+  - trivy
+  - security
+  - vulnerability
+  - kubernetes
+  - dashboard
+home: https://github.com/locustbaby/trivy-ui
+sources:
+  - https://github.com/locustbaby/trivy-ui
+maintainers:
+  - name: locustbaby
+    email: locustbaby@example.com
