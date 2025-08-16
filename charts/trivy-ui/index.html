@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trivy UI Helm Repository</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            color: #333;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 8px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+        }
+        .content {
+            background: #f8f9fa;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .install-section {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .code-block {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            margin: 10px 0;
+        }
+        .links {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin-top: 30px;
+        }
+        .link-button {
+            display: inline-block;
+            padding: 12px 24px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            transition: background 0.3s;
+        }
+        .link-button:hover {
+            background: #5a67d8;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔍 Trivy UI</h1>
+        <p>Helm Chart Repository</p>
+    </div>
+
+    <div class="content">
+        <h2>About Trivy UI</h2>
+        <p>
+            Trivy UI is a web-based dashboard for visualizing and managing Trivy vulnerability scan results 
+            across multiple Kubernetes clusters. This Helm chart provides a complete deployment solution 
+            with support for multi-cluster management, RBAC integration, and flexible configuration options.
+        </p>
+    </div>
+
+    <div class="install-section">
+        <h2>🚀 Quick Install</h2>
+        
+        <h3>From GitHub Pages</h3>
+        <div class="code-block">
+# Add the Helm repository
+helm repo add trivy-ui https://locustbaby.github.io/trivy-ui/
+helm repo update
+
+# Install the chart
+helm install my-trivy-ui trivy-ui/trivy-ui
+        </div>
+
+        <h3>From Docker Hub</h3>
+        <div class="code-block">
+# Install directly from Docker Hub Helm registry
+helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui
+        </div>
+    </div>
+
+    <div class="content">
+        <h2>🔧 Features</h2>
+        <ul>
+            <li><strong>Multi-Cluster Support:</strong> Manage multiple Kubernetes clusters through kubeconfig files</li>
+            <li><strong>RBAC Integration:</strong> Automatic creation of required RBAC resources</li>
+            <li><strong>Flexible Configuration:</strong> Extensive customization options through values.yaml</li>
+            <li><strong>Production Ready:</strong> Includes health checks, resource limits, and autoscaling</li>
+            <li><strong>Ingress Support:</strong> Built-in Ingress configuration with TLS support</li>
+        </ul>
+    </div>
+
+    <div class="links">
+        <a href="https://github.com/locustbaby/trivy-ui" class="link-button">📖 Documentation</a>
+        <a href="https://github.com/locustbaby/trivy-ui/issues" class="link-button">🐛 Report Issues</a>
+    </div>
+
+    <div style="text-align: center; margin-top: 40px; padding: 20px; border-top: 1px solid #e2e8f0; color: #718096;">
+        <p>
+            <strong>Trivy UI Helm Repository</strong><br>
+            Repository: <a href="https://github.com/locustbaby/trivy-ui">github.com/locustbaby/trivy-ui</a>
+        </p>
+    </div>
+</body>
+</html>

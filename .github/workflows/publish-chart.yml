@@ -1,0 +1,100 @@
+name: Publish Helm Chart to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: v3.12.0
+
+      - name: Add Helm repositories
+        run: |
+          helm repo add stable https://charts.helm.sh/stable
+
+      - name: Lint chart
+        run: |
+          helm lint charts/trivy-ui/
+
+      - name: Package chart
+        run: |
+          helm package charts/trivy-ui/
+          ls -la *.tgz
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Create Helm Repository
+        run: |
+          # Create a temporary directory for the repository
+          mkdir -p helm-repo
+          cp *.tgz helm-repo/
+          
+          # Generate index.yaml
+          helm repo index helm-repo/ --url https://locustbaby.github.io/trivy-ui/
+          
+          # Copy README to repository
+          cp charts/trivy-ui/README.md helm-repo/
+          
+          # Copy index.html for landing page
+          cp charts/trivy-ui/index.html helm-repo/
+          
+          echo "Repository files created:"
+          ls -la helm-repo/
+          cat helm-repo/index.yaml
+
+      - name: Upload Helm Repository to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: helm-repo/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Output chart URLs
+        run: |
+          echo "Chart published to GitHub Pages: https://locustbaby.github.io/trivy-ui/"
+          echo "Chart package: $(ls *.tgz)"
+          echo ""
+          echo "Users can install with:"
+          echo "helm repo add trivy-ui https://locustbaby.github.io/trivy-ui/"
+          echo "helm repo update"
+          echo "helm install my-trivy-ui trivy-ui/trivy-ui"
+          echo ""
+          echo "Or install directly:"
+          echo "helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui"
