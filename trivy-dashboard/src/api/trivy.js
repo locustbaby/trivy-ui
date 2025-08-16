@@ -67,16 +67,47 @@ export async function fetchReportTypes() {
   return response.data.data || []
 }
 
+// Helper function to check if a report type is cluster-wide
+function isClusterWideReport(type) {
+  const clusterWideTypes = [
+    'clustercompliancereports',
+    'clusterconfigauditreports', 
+    'clusterinfraassessmentreports',
+    'clusterrbacassessmentreports',
+    'clustersbomreports',
+    'clustervulnerabilityreports'
+  ]
+  return clusterWideTypes.includes(type)
+}
+
 export async function fetchReports(type, cluster, namespace, refresh = false) {
-  if (!type || !cluster || !namespace) return []
+  if (!type || !cluster) return []
+  
+  // For cluster-wide reports, don't require namespace
+  if (isClusterWideReport(type)) {
+    const params = refresh ? { refresh: 1 } : {}
+    const response = await axios.get(`${apiBaseUrl}/api/reports/${type}/${cluster}`, { params })
+    return response.data.data || []
+  }
+  
+  // For namespaced reports, require namespace
+  if (!namespace) return []
   const params = refresh ? { refresh: 1 } : {}
   const response = await axios.get(`${apiBaseUrl}/api/reports/${type}/${cluster}/${namespace}`, { params })
-  // The backend returns an array of reports in data
   return response.data.data || []
 }
 
 export async function fetchReportDetails(type, cluster, namespace, name) {
-  if (!type || !cluster || !namespace || !name) return null
+  if (!type || !cluster || !name) return null
+  
+  // For cluster-wide reports, don't require namespace
+  if (isClusterWideReport(type)) {
+    const response = await axios.get(`${apiBaseUrl}/api/reports/${type}/${cluster}/${name}`)
+    return response.data.data || null
+  }
+  
+  // For namespaced reports, require namespace
+  if (!namespace) return null
   const response = await axios.get(`${apiBaseUrl}/api/reports/${type}/${cluster}/${namespace}/${name}`)
   return response.data.data || null
 }

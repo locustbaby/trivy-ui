@@ -16,8 +16,8 @@
               <SelectItem v-for="c in clusters" :key="c.name" :value="c.name">{{ c.name }}</SelectItem>
             </SelectContent>
           </Select>
-          <!-- Namespace Selector -->
-          <Select v-model="selectedNamespace">
+          <!-- Namespace Selector (only for namespaced reports) -->
+          <Select v-model="selectedNamespace" v-if="!isClusterWideReport(selectedReportType)">
             <SelectTrigger class="w-40">
               <SelectValue placeholder="Select Namespace" />
             </SelectTrigger>
@@ -103,7 +103,7 @@
                 Type: {{ selectedReportType }} | Path: {{ reportData ? 'report' : 'none' }}
               </div>
               <template v-if="selectedReportType && selectedReportType.toLowerCase().includes('vuln') && reportData">
-                <!-- Artifact/OS/Scanner/Summary -->
+                <!-- Vulnerability Report - Artifact/OS/Scanner/Summary -->
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                   <div class="bg-muted rounded p-3">
                     <div class="font-semibold mb-1">Artifact</div>
@@ -193,6 +193,444 @@
                   class="mt-2"
                 />
               </template>
+              <template v-else-if="selectedReportType && selectedReportType.toLowerCase().includes('configaudit') && reportData">
+                <!-- Config Audit Report -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Scanner</div>
+                    <div>Name: {{ reportData.scanner?.name || 'N/A' }}</div>
+                    <div>Vendor: {{ reportData.scanner?.vendor || 'N/A' }}</div>
+                    <div>Version: {{ reportData.scanner?.version || 'N/A' }}</div>
+                  </div>
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Summary</div>
+                    <div class="flex flex-wrap gap-2 mt-1">
+                      <Badge
+                        v-for="sev in severityOrder"
+                        :key="sev"
+                        :variant="sev"
+                        :class="[
+                          'cursor-pointer select-none',
+                          activeSeverity === sev ? 'ring-2 ring-offset-2 ring-primary scale-105' : '',
+                        ]"
+                        @click.stop="toggleSeverityFilter(sev)"
+                      >
+                        {{ sev.charAt(0).toUpperCase() + sev.slice(1) }}: {{ reportData.summary?.[severityKeyMap[sev]] || 0 }}
+                      </Badge>
+                    </div>
+                  </div>
+                </div>
+                <!-- Config Audit Results Table -->
+                <div class="mb-2 font-semibold border-t pt-4">Configuration Audit Results</div>
+                <div class="flex items-center gap-2 mb-2">
+                  <input
+                    v-model="searchText"
+                    type="text"
+                    placeholder="Search Resource, Kind, Name..."
+                    class="border rounded px-2 py-1 w-64 text-sm focus:outline-none focus:ring"
+                  />
+                  <span v-if="activeSeverity" class="text-xs text-muted-foreground">Filtering: {{ activeSeverity }}</span>
+                </div>
+                <div class="overflow-x-auto custom-scrollbar">
+                  <Table v-if="Array.isArray(reportData.checks) && reportData.checks.length">
+                    <TableHeader class="bg-muted">
+                      <TableRow>
+                        <TableHead class="font-bold">Check ID</TableHead>
+                        <TableHead class="font-bold">Title</TableHead>
+                        <TableHead class="font-bold">Resource</TableHead>
+                        <TableHead class="font-bold">Severity</TableHead>
+                        <TableHead class="font-bold">Status</TableHead>
+                        <TableHead class="font-bold">Description</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <TableRow v-for="check in pagedChecks" :key="check.id" class="hover:bg-accent/50 transition-colors">
+                        <TableCell>{{ check.id }}</TableCell>
+                        <TableCell>{{ check.title }}</TableCell>
+                        <TableCell>{{ check.resource }}</TableCell>
+                        <TableCell>
+                          <Badge :variant="check.severity === 'CRITICAL' ? 'destructive' : 'secondary'">{{ check.severity }}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge :variant="check.success ? 'default' : 'destructive'">{{ check.success ? 'PASS' : 'FAIL' }}</Badge>
+                        </TableCell>
+                        <TableCell>{{ check.description }}</TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                  <div v-else class="text-muted-foreground">No configuration audit results found.</div>
+                </div>
+                <SmartPagination
+                  v-if="checkTotalPages > 1"
+                  :page="checkPage"
+                  :items-per-page="checkPageSize"
+                  :total="reportData.checks.length"
+                  @update:page="checkPage = $event"
+                  class="mt-2"
+                />
+              </template>
+              <template v-else-if="selectedReportType && selectedReportType.toLowerCase().includes('exposedsecret') && reportData">
+                <!-- Exposed Secret Report -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Scanner</div>
+                    <div>Name: {{ reportData.scanner?.name || 'N/A' }}</div>
+                    <div>Vendor: {{ reportData.scanner?.vendor || 'N/A' }}</div>
+                    <div>Version: {{ reportData.scanner?.version || 'N/A' }}</div>
+                  </div>
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Summary</div>
+                    <div class="flex flex-wrap gap-2 mt-1">
+                      <Badge
+                        v-for="sev in severityOrder"
+                        :key="sev"
+                        :variant="sev"
+                        :class="[
+                          'cursor-pointer select-none',
+                          activeSeverity === sev ? 'ring-2 ring-offset-2 ring-primary scale-105' : '',
+                        ]"
+                        @click.stop="toggleSeverityFilter(sev)"
+                      >
+                        {{ sev.charAt(0).toUpperCase() + sev.slice(1) }}: {{ reportData.summary?.[severityKeyMap[sev]] || 0 }}
+                      </Badge>
+                    </div>
+                  </div>
+                </div>
+                <!-- Exposed Secrets Table -->
+                <div class="mb-2 font-semibold border-t pt-4">Exposed Secrets</div>
+                <div class="flex items-center gap-2 mb-2">
+                  <input
+                    v-model="searchText"
+                    type="text"
+                    placeholder="Search Secret, Rule, Target..."
+                    class="border rounded px-2 py-1 w-64 text-sm focus:outline-none focus:ring"
+                  />
+                  <span v-if="activeSeverity" class="text-xs text-muted-foreground">Filtering: {{ activeSeverity }}</span>
+                </div>
+                <div class="overflow-x-auto custom-scrollbar">
+                  <Table v-if="Array.isArray(reportData.secrets) && reportData.secrets.length">
+                    <TableHeader class="bg-muted">
+                      <TableRow>
+                        <TableHead class="font-bold">Rule ID</TableHead>
+                        <TableHead class="font-bold">Title</TableHead>
+                        <TableHead class="font-bold">Target</TableHead>
+                        <TableHead class="font-bold">Severity</TableHead>
+                        <TableHead class="font-bold">Category</TableHead>
+                        <TableHead class="font-bold">Match</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <TableRow v-for="secret in pagedSecrets" :key="secret.ruleID" class="hover:bg-accent/50 transition-colors">
+                        <TableCell>{{ secret.ruleID }}</TableCell>
+                        <TableCell>{{ secret.title }}</TableCell>
+                        <TableCell>{{ secret.target }}</TableCell>
+                        <TableCell>
+                          <Badge :variant="secret.severity === 'CRITICAL' ? 'destructive' : 'secondary'">{{ secret.severity }}</Badge>
+                        </TableCell>
+                        <TableCell>{{ secret.category }}</TableCell>
+                        <TableCell>{{ secret.match }}</TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                  <div v-else class="text-muted-foreground">No exposed secrets found.</div>
+                </div>
+                <SmartPagination
+                  v-if="secretTotalPages > 1"
+                  :page="secretPage"
+                  :items-per-page="secretPageSize"
+                  :total="reportData.secrets.length"
+                  @update:page="secretPage = $event"
+                  class="mt-2"
+                />
+              </template>
+              <template v-else-if="selectedReportType && selectedReportType.toLowerCase().includes('sbom') && reportData">
+                <!-- SBOM Report -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Artifact</div>
+                    <div>Repository: <span class="font-mono">{{ reportData.artifact?.repository || 'N/A' }}</span></div>
+                    <div>Tag: <span class="font-mono">{{ reportData.artifact?.tag || 'N/A' }}</span></div>
+                    <div>Digest: <span class="font-mono break-all">{{ reportData.artifact?.digest || 'N/A' }}</span></div>
+                  </div>
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Scanner</div>
+                    <div>Name: {{ reportData.scanner?.name || 'N/A' }}</div>
+                    <div>Vendor: {{ reportData.scanner?.vendor || 'N/A' }}</div>
+                    <div>Version: {{ reportData.scanner?.version || 'N/A' }}</div>
+                  </div>
+                </div>
+                <!-- SBOM Packages Table -->
+                <div class="mb-2 font-semibold border-t pt-4">Software Bill of Materials</div>
+                <div class="flex items-center gap-2 mb-2">
+                  <input
+                    v-model="searchText"
+                    type="text"
+                    placeholder="Search Package, Name, Version..."
+                    class="border rounded px-2 py-1 w-64 text-sm focus:outline-none focus:ring"
+                  />
+                </div>
+                <div class="overflow-x-auto custom-scrollbar">
+                  <Table v-if="Array.isArray(reportData.packages) && reportData.packages.length">
+                    <TableHeader class="bg-muted">
+                      <TableRow>
+                        <TableHead class="font-bold">Name</TableHead>
+                        <TableHead class="font-bold">Version</TableHead>
+                        <TableHead class="font-bold">Type</TableHead>
+                        <TableHead class="font-bold">PURL</TableHead>
+                        <TableHead class="font-bold">License</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <TableRow v-for="pkg in pagedPackages" :key="pkg.id" class="hover:bg-accent/50 transition-colors">
+                        <TableCell>{{ pkg.name }}</TableCell>
+                        <TableCell>{{ pkg.version }}</TableCell>
+                        <TableCell>{{ pkg.type }}</TableCell>
+                        <TableCell>{{ pkg.purl }}</TableCell>
+                        <TableCell>{{ pkg.license }}</TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                  <div v-else class="text-muted-foreground">No packages found in SBOM.</div>
+                </div>
+                <SmartPagination
+                  v-if="packageTotalPages > 1"
+                  :page="packagePage"
+                  :items-per-page="packagePageSize"
+                  :total="reportData.packages.length"
+                  @update:page="packagePage = $event"
+                  class="mt-2"
+                />
+              </template>
+              <template v-else-if="selectedReportType && selectedReportType.toLowerCase().includes('rbacassessment') && reportData">
+                <!-- RBAC Assessment Report -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Scanner</div>
+                    <div>Name: {{ reportData.scanner?.name || 'N/A' }}</div>
+                    <div>Vendor: {{ reportData.scanner?.vendor || 'N/A' }}</div>
+                    <div>Version: {{ reportData.scanner?.version || 'N/A' }}</div>
+                  </div>
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Summary</div>
+                    <div class="flex flex-wrap gap-2 mt-1">
+                      <Badge
+                        v-for="sev in severityOrder"
+                        :key="sev"
+                        :variant="sev"
+                        :class="[
+                          'cursor-pointer select-none',
+                          activeSeverity === sev ? 'ring-2 ring-offset-2 ring-primary scale-105' : '',
+                        ]"
+                        @click.stop="toggleSeverityFilter(sev)"
+                      >
+                        {{ sev.charAt(0).toUpperCase() + sev.slice(1) }}: {{ reportData.summary?.[severityKeyMap[sev]] || 0 }}
+                      </Badge>
+                    </div>
+                  </div>
+                </div>
+                <!-- RBAC Assessment Results Table -->
+                <div class="mb-2 font-semibold border-t pt-4">RBAC Assessment Results</div>
+                <div class="flex items-center gap-2 mb-2">
+                  <input
+                    v-model="searchText"
+                    type="text"
+                    placeholder="Search Role, Subject, Resource..."
+                    class="border rounded px-2 py-1 w-64 text-sm focus:outline-none focus:ring"
+                  />
+                  <span v-if="activeSeverity" class="text-xs text-muted-foreground">Filtering: {{ activeSeverity }}</span>
+                </div>
+                <div class="overflow-x-auto custom-scrollbar">
+                  <Table v-if="Array.isArray(reportData.checks) && reportData.checks.length">
+                    <TableHeader class="bg-muted">
+                      <TableRow>
+                        <TableHead class="font-bold">Check ID</TableHead>
+                        <TableHead class="font-bold">Title</TableHead>
+                        <TableHead class="font-bold">Role</TableHead>
+                        <TableHead class="font-bold">Subject</TableHead>
+                        <TableHead class="font-bold">Severity</TableHead>
+                        <TableHead class="font-bold">Status</TableHead>
+                        <TableHead class="font-bold">Description</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <TableRow v-for="check in pagedChecks" :key="check.id" class="hover:bg-accent/50 transition-colors">
+                        <TableCell>{{ check.id }}</TableCell>
+                        <TableCell>{{ check.title }}</TableCell>
+                        <TableCell>{{ check.role }}</TableCell>
+                        <TableCell>{{ check.subject }}</TableCell>
+                        <TableCell>
+                          <Badge :variant="check.severity === 'CRITICAL' ? 'destructive' : 'secondary'">{{ check.severity }}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge :variant="check.success ? 'default' : 'destructive'">{{ check.success ? 'PASS' : 'FAIL' }}</Badge>
+                        </TableCell>
+                        <TableCell>{{ check.description }}</TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                  <div v-else class="text-muted-foreground">No RBAC assessment results found.</div>
+                </div>
+                <SmartPagination
+                  v-if="checkTotalPages > 1"
+                  :page="checkPage"
+                  :items-per-page="checkPageSize"
+                  :total="reportData.checks.length"
+                  @update:page="checkPage = $event"
+                  class="mt-2"
+                />
+              </template>
+              <template v-else-if="selectedReportType && selectedReportType.toLowerCase().includes('infraassessment') && reportData">
+                <!-- Infrastructure Assessment Report -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Scanner</div>
+                    <div>Name: {{ reportData.scanner?.name || 'N/A' }}</div>
+                    <div>Vendor: {{ reportData.scanner?.vendor || 'N/A' }}</div>
+                    <div>Version: {{ reportData.scanner?.version || 'N/A' }}</div>
+                  </div>
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Summary</div>
+                    <div class="flex flex-wrap gap-2 mt-1">
+                      <Badge
+                        v-for="sev in severityOrder"
+                        :key="sev"
+                        :variant="sev"
+                        :class="[
+                          'cursor-pointer select-none',
+                          activeSeverity === sev ? 'ring-2 ring-offset-2 ring-primary scale-105' : '',
+                        ]"
+                        @click.stop="toggleSeverityFilter(sev)"
+                      >
+                        {{ sev.charAt(0).toUpperCase() + sev.slice(1) }}: {{ reportData.summary?.[severityKeyMap[sev]] || 0 }}
+                      </Badge>
+                    </div>
+                  </div>
+                </div>
+                <!-- Infrastructure Assessment Results Table -->
+                <div class="mb-2 font-semibold border-t pt-4">Infrastructure Assessment Results</div>
+                <div class="flex items-center gap-2 mb-2">
+                  <input
+                    v-model="searchText"
+                    type="text"
+                    placeholder="Search Resource, Kind, Name..."
+                    class="border rounded px-2 py-1 w-64 text-sm focus:outline-none focus:ring"
+                  />
+                  <span v-if="activeSeverity" class="text-xs text-muted-foreground">Filtering: {{ activeSeverity }}</span>
+                </div>
+                <div class="overflow-x-auto custom-scrollbar">
+                  <Table v-if="Array.isArray(reportData.checks) && reportData.checks.length">
+                    <TableHeader class="bg-muted">
+                      <TableRow>
+                        <TableHead class="font-bold">Check ID</TableHead>
+                        <TableHead class="font-bold">Title</TableHead>
+                        <TableHead class="font-bold">Resource</TableHead>
+                        <TableHead class="font-bold">Severity</TableHead>
+                        <TableHead class="font-bold">Status</TableHead>
+                        <TableHead class="font-bold">Description</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <TableRow v-for="check in pagedChecks" :key="check.id" class="hover:bg-accent/50 transition-colors">
+                        <TableCell>{{ check.id }}</TableCell>
+                        <TableCell>{{ check.title }}</TableCell>
+                        <TableCell>{{ check.resource }}</TableCell>
+                        <TableCell>
+                          <Badge :variant="check.severity === 'CRITICAL' ? 'destructive' : 'secondary'">{{ check.severity }}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge :variant="check.success ? 'default' : 'destructive'">{{ check.success ? 'PASS' : 'FAIL' }}</Badge>
+                        </TableCell>
+                        <TableCell>{{ check.description }}</TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                  <div v-else class="text-muted-foreground">No infrastructure assessment results found.</div>
+                </div>
+                <SmartPagination
+                  v-if="checkTotalPages > 1"
+                  :page="checkPage"
+                  :items-per-page="checkPageSize"
+                  :total="reportData.checks.length"
+                  @update:page="checkPage = $event"
+                  class="mt-2"
+                />
+              </template>
+              <template v-else-if="selectedReportType && selectedReportType.toLowerCase().includes('compliance') && reportData">
+                <!-- Compliance Report -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Scanner</div>
+                    <div>Name: {{ reportData.scanner?.name || 'N/A' }}</div>
+                    <div>Vendor: {{ reportData.scanner?.vendor || 'N/A' }}</div>
+                    <div>Version: {{ reportData.scanner?.version || 'N/A' }}</div>
+                  </div>
+                  <div class="bg-muted rounded p-3">
+                    <div class="font-semibold mb-1">Summary</div>
+                    <div class="flex flex-wrap gap-2 mt-1">
+                      <Badge
+                        v-for="sev in severityOrder"
+                        :key="sev"
+                        :variant="sev"
+                        :class="[
+                          'cursor-pointer select-none',
+                          activeSeverity === sev ? 'ring-2 ring-offset-2 ring-primary scale-105' : '',
+                        ]"
+                        @click.stop="toggleSeverityFilter(sev)"
+                      >
+                        {{ sev.charAt(0).toUpperCase() + sev.slice(1) }}: {{ reportData.summary?.[severityKeyMap[sev]] || 0 }}
+                      </Badge>
+                    </div>
+                  </div>
+                </div>
+                <!-- Compliance Results Table -->
+                <div class="mb-2 font-semibold border-t pt-4">Compliance Results</div>
+                <div class="flex items-center gap-2 mb-2">
+                  <input
+                    v-model="searchText"
+                    type="text"
+                    placeholder="Search Control, Title, Resource..."
+                    class="border rounded px-2 py-1 w-64 text-sm focus:outline-none focus:ring"
+                  />
+                  <span v-if="activeSeverity" class="text-xs text-muted-foreground">Filtering: {{ activeSeverity }}</span>
+                </div>
+                <div class="overflow-x-auto custom-scrollbar">
+                  <Table v-if="Array.isArray(reportData.checks) && reportData.checks.length">
+                    <TableHeader class="bg-muted">
+                      <TableRow>
+                        <TableHead class="font-bold">Control ID</TableHead>
+                        <TableHead class="font-bold">Title</TableHead>
+                        <TableHead class="font-bold">Resource</TableHead>
+                        <TableHead class="font-bold">Severity</TableHead>
+                        <TableHead class="font-bold">Status</TableHead>
+                        <TableHead class="font-bold">Description</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <TableRow v-for="check in pagedChecks" :key="check.id" class="hover:bg-accent/50 transition-colors">
+                        <TableCell>{{ check.id }}</TableCell>
+                        <TableCell>{{ check.title }}</TableCell>
+                        <TableCell>{{ check.resource }}</TableCell>
+                        <TableCell>
+                          <Badge :variant="check.severity === 'CRITICAL' ? 'destructive' : 'secondary'">{{ check.severity }}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge :variant="check.success ? 'default' : 'destructive'">{{ check.success ? 'PASS' : 'FAIL' }}</Badge>
+                        </TableCell>
+                        <TableCell>{{ check.description }}</TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                  <div v-else class="text-muted-foreground">No compliance results found.</div>
+                </div>
+                <SmartPagination
+                  v-if="checkTotalPages > 1"
+                  :page="checkPage"
+                  :items-per-page="checkPageSize"
+                  :total="reportData.checks.length"
+                  @update:page="checkPage = $event"
+                  class="mt-2"
+                />
+              </template>
               <template v-else>
                 <div class="overflow-auto max-h-[60vh] bg-muted rounded p-4 custom-scrollbar">
                   <pre class="text-xs whitespace-pre-wrap">{{ formatJson(selectedReport?.data) }}</pre>
@@ -261,9 +699,16 @@ const reportData = computed(() => {
   return selectedReport?.value?.data?.report || selectedReport?.value?.data?.data?.report || null;
 });
 
-// 详情弹窗内漏洞分页
+// 详情弹窗内分页和过滤
 const vulnPage = ref(1);
 const vulnPageSize = 10;
+const checkPage = ref(1);
+const checkPageSize = 10;
+const secretPage = ref(1);
+const secretPageSize = 10;
+const packagePage = ref(1);
+const packagePageSize = 10;
+
 const severityOrder = ['critical', 'high', 'medium', 'low', 'unknown'];
 const severityKeyMap = {
   critical: 'criticalCount',
@@ -276,8 +721,12 @@ const activeSeverity = ref('');
 function toggleSeverityFilter(sev) {
   activeSeverity.value = activeSeverity.value === sev ? '' : sev;
   vulnPage.value = 1;
+  checkPage.value = 1;
+  secretPage.value = 1;
 }
 const searchText = ref('');
+
+// Vulnerability filtering and pagination
 const filteredVulns = computed(() => {
   if (!reportData.value || !Array.isArray(reportData.value.vulnerabilities)) return [];
   let vulns = reportData.value.vulnerabilities;
@@ -300,16 +749,92 @@ const pagedVulns = computed(() => {
 });
 const vulnTotalPages = computed(() => Math.ceil(filteredVulns.value.length / vulnPageSize) || 1);
 
+// Config Audit filtering and pagination
+const filteredChecks = computed(() => {
+  if (!reportData.value || !Array.isArray(reportData.value.checks)) return [];
+  let checks = reportData.value.checks;
+  if (activeSeverity.value) {
+    checks = checks.filter(c => c.severity && c.severity.toLowerCase() === activeSeverity.value);
+  }
+  if (searchText.value.trim()) {
+    const q = searchText.value.trim().toLowerCase();
+    checks = checks.filter(c =>
+      (c.id && c.id.toLowerCase().includes(q)) ||
+      (c.title && c.title.toLowerCase().includes(q)) ||
+      (c.resource && c.resource.toLowerCase().includes(q))
+    );
+  }
+  return checks;
+});
+const pagedChecks = computed(() => {
+  const start = (checkPage.value - 1) * checkPageSize;
+  return filteredChecks.value.slice(start, start + checkPageSize);
+});
+const checkTotalPages = computed(() => Math.ceil(filteredChecks.value.length / checkPageSize) || 1);
+
+// Exposed Secret filtering and pagination
+const filteredSecrets = computed(() => {
+  if (!reportData.value || !Array.isArray(reportData.value.secrets)) return [];
+  let secrets = reportData.value.secrets;
+  if (activeSeverity.value) {
+    secrets = secrets.filter(s => s.severity && s.severity.toLowerCase() === activeSeverity.value);
+  }
+  if (searchText.value.trim()) {
+    const q = searchText.value.trim().toLowerCase();
+    secrets = secrets.filter(s =>
+      (s.ruleID && s.ruleID.toLowerCase().includes(q)) ||
+      (s.title && s.title.toLowerCase().includes(q)) ||
+      (s.target && s.target.toLowerCase().includes(q))
+    );
+  }
+  return secrets;
+});
+const pagedSecrets = computed(() => {
+  const start = (secretPage.value - 1) * secretPageSize;
+  return filteredSecrets.value.slice(start, start + secretPageSize);
+});
+const secretTotalPages = computed(() => Math.ceil(filteredSecrets.value.length / secretPageSize) || 1);
+
+// SBOM Package filtering and pagination
+const filteredPackages = computed(() => {
+  if (!reportData.value || !Array.isArray(reportData.value.packages)) return [];
+  if (searchText.value.trim()) {
+    const q = searchText.value.trim().toLowerCase();
+    return reportData.value.packages.filter(p =>
+      (p.name && p.name.toLowerCase().includes(q)) ||
+      (p.version && p.version.toLowerCase().includes(q)) ||
+      (p.type && p.type.toLowerCase().includes(q))
+    );
+  }
+  return reportData.value.packages;
+});
+const pagedPackages = computed(() => {
+  const start = (packagePage.value - 1) * packagePageSize;
+  return filteredPackages.value.slice(start, start + packagePageSize);
+});
+const packageTotalPages = computed(() => Math.ceil(filteredPackages.value.length / packagePageSize) || 1);
+
 async function showDetail(report) {
   detailOpen.value = true;
   detailLoading.value = true;
   try {
     const type = selectedReportType.value;
     const cluster = selectedCluster.value;
-    const namespace = selectedNamespace.value;
     const name = report.data.meta.name;
-    const detail = await fetchReportDetails(type, cluster, namespace, name);
-    selectedReport.value = { data: detail };
+    
+    // For cluster-wide reports, don't pass namespace
+    if (isClusterWideReport(type)) {
+      const detail = await fetchReportDetails(type, cluster, null, name);
+      selectedReport.value = { data: detail };
+    } else {
+      // For namespaced reports, require namespace
+      const namespace = selectedNamespace.value;
+      if (!namespace) {
+        throw new Error('Namespace is required for namespaced reports');
+      }
+      const detail = await fetchReportDetails(type, cluster, namespace, name);
+      selectedReport.value = { data: detail };
+    }
   } catch (e) {
     selectedReport.value = { data: { error: e.message } };
   } finally {
@@ -349,8 +874,8 @@ async function loadClustersAndNamespaces(force = false) {
         selectedCluster.value = '';
       }
     }
-    // Always fetch namespaces if force or namespaces is empty
-    if (selectedCluster.value && (force || namespaces.value.length === 0)) {
+    // Always fetch namespaces if force or namespaces is empty (but not for cluster-wide reports)
+    if (selectedCluster.value && (force || namespaces.value.length === 0) && !isClusterWideReport(selectedReportType.value)) {
       const nsResp = await fetchNamespaces(selectedCluster.value);
       namespaces.value = (nsResp.data || nsResp) ?? [];
       if (namespaces.value.length > 0) {
@@ -377,6 +902,21 @@ onMounted(async () => {
         selectedReportType.value = reportTypes.value[0];
       }
     }
+    
+    // 主动触发获取reports，确保页面刷新后能显示数据
+    if (selectedCluster.value && selectedReportType.value) {
+      // For cluster-wide reports, don't require namespace
+      if (isClusterWideReport(selectedReportType.value)) {
+        const resp = await fetchReports(selectedReportType.value, selectedCluster.value, null);
+        reports.value = (resp.data || resp) ?? [];
+      } else {
+        // For namespaced reports, require namespace
+        if (selectedNamespace.value) {
+          const resp = await fetchReports(selectedReportType.value, selectedCluster.value, selectedNamespace.value);
+          reports.value = (resp.data || resp) ?? [];
+        }
+      }
+    }
   } finally {
     loading.value = false;
   }
@@ -390,6 +930,14 @@ watch(selectedCluster, async (val) => {
     selectedNamespace.value = '';
     return;
   }
+  
+  // For cluster-wide reports, don't load namespaces
+  if (isClusterWideReport(selectedReportType.value)) {
+    namespaces.value = [];
+    selectedNamespace.value = '';
+    return;
+  }
+  
   loading.value = true;
   try {
     const nsResp = await fetchNamespaces(val);
@@ -413,9 +961,38 @@ watch(selectedReportType, (val) => {
   localStorage.setItem('selectedReportType', val || '');
 });
 
+// Helper function to check if a report type is cluster-wide
+function isClusterWideReport(type) {
+  const clusterWideTypes = [
+    'clustercompliancereports',
+    'clusterconfigauditreports', 
+    'clusterinfraassessmentreports',
+    'clusterrbacassessmentreports',
+    'clustersbomreports',
+    'clustervulnerabilityreports'
+  ]
+  return clusterWideTypes.includes(type)
+}
+
 // 监听选择变化加载报告
 watch([selectedCluster, selectedNamespace, selectedReportType], async ([c, ns, type]) => {
-  if (!c || !ns || !type) return;
+  if (!c || !type) return;
+  
+  // For cluster-wide reports, don't require namespace
+  if (isClusterWideReport(type)) {
+    loading.value = true;
+    try {
+      const resp = await fetchReports(type, c, null);
+      reports.value = (resp.data || resp) ?? [];
+      page.value = 1;
+    } finally {
+      loading.value = false;
+    }
+    return;
+  }
+  
+  // For namespaced reports, require namespace
+  if (!ns) return;
   loading.value = true;
   try {
     const resp = await fetchReports(type, c, ns);
@@ -427,12 +1004,30 @@ watch([selectedCluster, selectedNamespace, selectedReportType], async ([c, ns, t
 });
 
 async function refreshReports() {
-  // 如果 clusters/selectedCluster/selectedNamespace 为空，强制重新请求
-  if (!clusters.value.length || !selectedCluster.value || !selectedNamespace.value) {
+  // 如果 clusters/selectedCluster 为空，强制重新请求
+  if (!clusters.value.length || !selectedCluster.value) {
     await loadClustersAndNamespaces(true);
   }
-  if (selectedCluster.value && selectedNamespace.value && selectedReportType.value) {
+  
+  if (selectedCluster.value && selectedReportType.value) {
     loading.value = true;
+    
+    // For cluster-wide reports, don't require namespace
+    if (isClusterWideReport(selectedReportType.value)) {
+      fetchReports(selectedReportType.value, selectedCluster.value, null, true).then(resp => {
+        reports.value = (resp.data || resp) ?? [];
+        page.value = 1;
+        loading.value = false;
+      });
+      return;
+    }
+    
+    // For namespaced reports, require namespace
+    if (!selectedNamespace.value) {
+      loading.value = false;
+      return;
+    }
+    
     fetchReports(selectedReportType.value, selectedCluster.value, selectedNamespace.value, true).then(resp => {
       reports.value = (resp.data || resp) ?? [];
       page.value = 1;
@@ -443,7 +1038,14 @@ async function refreshReports() {
 
 // 在每次弹窗打开时重置分页
 watch(detailOpen, (open) => {
-  if (open) vulnPage.value = 1;
+  if (open) {
+    vulnPage.value = 1;
+    checkPage.value = 1;
+    secretPage.value = 1;
+    packagePage.value = 1;
+    activeSeverity.value = '';
+    searchText.value = '';
+  }
 });
 
 // 搜索时自动跳转到第一页

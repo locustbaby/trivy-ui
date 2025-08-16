@@ -10,6 +10,24 @@ import (
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
+// isClusterWideReport checks if a report type is cluster-wide
+func isClusterWideReport(reportType string) bool {
+	clusterWideTypes := []string{
+		"clustercompliancereports",
+		"clusterconfigauditreports", 
+		"clusterinfraassessmentreports",
+		"clusterrbacassessmentreports",
+		"clustersbomreports",
+		"clustervulnerabilityreports",
+	}
+	for _, t := range clusterWideTypes {
+		if t == reportType {
+			return true
+		}
+	}
+	return false
+}
+
 // Router handles HTTP routing
 type Router struct {
 	mux     *http.ServeMux
@@ -40,13 +58,32 @@ func (r *Router) Setup(staticPath string) {
 	// Returns a specific report by type, cluster, namespace, and name
 	r.mux.HandleFunc("/api/reports/", func(w http.ResponseWriter, req *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(req.URL.Path, "/api/reports/"), "/")
-		if req.Method == http.MethodGet && len(parts) == 3 {
-			// swagger:route GET /api/reports/{type}/{cluster}/{namespace} reports listReportsByTypeAndNamespace
-			// Returns all reports for a specific type, cluster, and namespace
+		if req.Method == http.MethodGet && len(parts) == 2 {
+			// swagger:route GET /api/reports/{type}/{cluster} reports listReportsByTypeAndCluster
+			// Returns all cluster-wide reports for a specific type and cluster
 			reportType := parts[0]
 			cluster := parts[1]
-			namespace := parts[2]
-			r.handler.GetReportsByTypeAndNamespace(w, req, reportType, cluster, namespace)
+			r.handler.GetReportsByTypeAndCluster(w, req, reportType, cluster)
+			return
+		}
+		if req.Method == http.MethodGet && len(parts) == 3 {
+			// Check if this is a cluster-wide report type
+			reportType := parts[0]
+			cluster := parts[1]
+			thirdPart := parts[2]
+			
+			// Check if the third part looks like a namespace (contains namespace-like patterns)
+			// For cluster-wide reports, the third part is the report name
+			// For namespaced reports, the third part is the namespace
+			if isClusterWideReport(reportType) {
+				// swagger:route GET /api/reports/{type}/{cluster}/{name} reports getClusterReport
+				// Returns a specific cluster-wide report by type, cluster, and name
+				r.handler.GetClusterReport(w, req, reportType, cluster, thirdPart)
+			} else {
+				// swagger:route GET /api/reports/{type}/{cluster}/{namespace} reports listReportsByTypeAndNamespace
+				// Returns all reports for a specific type, cluster, and namespace
+				r.handler.GetReportsByTypeAndNamespace(w, req, reportType, cluster, thirdPart)
+			}
 			return
 		}
 		if req.Method == http.MethodGet && len(parts) == 4 {
