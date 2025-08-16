@@ -16,8 +16,8 @@
               <SelectItem v-for="c in clusters" :key="c.name" :value="c.name">{{ c.name }}</SelectItem>
             </SelectContent>
           </Select>
-          <!-- Namespace Selector -->
-          <Select v-model="selectedNamespace">
+          <!-- Namespace Selector (only for namespaced reports) -->
+          <Select v-model="selectedNamespace" v-if="!isClusterWideReport(selectedReportType)">
             <SelectTrigger class="w-40">
               <SelectValue placeholder="Select Namespace" />
             </SelectTrigger>
@@ -820,10 +820,21 @@ async function showDetail(report) {
   try {
     const type = selectedReportType.value;
     const cluster = selectedCluster.value;
-    const namespace = selectedNamespace.value;
     const name = report.data.meta.name;
-    const detail = await fetchReportDetails(type, cluster, namespace, name);
-    selectedReport.value = { data: detail };
+    
+    // For cluster-wide reports, don't pass namespace
+    if (isClusterWideReport(type)) {
+      const detail = await fetchReportDetails(type, cluster, null, name);
+      selectedReport.value = { data: detail };
+    } else {
+      // For namespaced reports, require namespace
+      const namespace = selectedNamespace.value;
+      if (!namespace) {
+        throw new Error('Namespace is required for namespaced reports');
+      }
+      const detail = await fetchReportDetails(type, cluster, namespace, name);
+      selectedReport.value = { data: detail };
+    }
   } catch (e) {
     selectedReport.value = { data: { error: e.message } };
   } finally {
@@ -863,8 +874,8 @@ async function loadClustersAndNamespaces(force = false) {
         selectedCluster.value = '';
       }
     }
-    // Always fetch namespaces if force or namespaces is empty
-    if (selectedCluster.value && (force || namespaces.value.length === 0)) {
+    // Always fetch namespaces if force or namespaces is empty (but not for cluster-wide reports)
+    if (selectedCluster.value && (force || namespaces.value.length === 0) && !isClusterWideReport(selectedReportType.value)) {
       const nsResp = await fetchNamespaces(selectedCluster.value);
       namespaces.value = (nsResp.data || nsResp) ?? [];
       if (namespaces.value.length > 0) {
@@ -891,6 +902,21 @@ onMounted(async () => {
         selectedReportType.value = reportTypes.value[0];
       }
     }
+    
+    // 主动触发获取reports，确保页面刷新后能显示数据
+    if (selectedCluster.value && selectedReportType.value) {
+      // For cluster-wide reports, don't require namespace
+      if (isClusterWideReport(selectedReportType.value)) {
+        const resp = await fetchReports(selectedReportType.value, selectedCluster.value, null);
+        reports.value = (resp.data || resp) ?? [];
+      } else {
+        // For namespaced reports, require namespace
+        if (selectedNamespace.value) {
+          const resp = await fetchReports(selectedReportType.value, selectedCluster.value, selectedNamespace.value);
+          reports.value = (resp.data || resp) ?? [];
+        }
+      }
+    }
   } finally {
     loading.value = false;
   }
@@ -904,6 +930,14 @@ watch(selectedCluster, async (val) => {
     selectedNamespace.value = '';
     return;
   }
+  
+  // For cluster-wide reports, don't load namespaces
+  if (isClusterWideReport(selectedReportType.value)) {
+    namespaces.value = [];
+    selectedNamespace.value = '';
+    return;
+  }
+  
   loading.value = true;
   try {
     const nsResp = await fetchNamespaces(val);
@@ -927,9 +961,38 @@ watch(selectedReportType, (val) => {
   localStorage.setItem('selectedReportType', val || '');
 });
 
+// Helper function to check if a report type is cluster-wide
+function isClusterWideReport(type) {
+  const clusterWideTypes = [
+    'clustercompliancereports',
+    'clusterconfigauditreports', 
+    'clusterinfraassessmentreports',
+    'clusterrbacassessmentreports',
+    'clustersbomreports',
+    'clustervulnerabilityreports'
+  ]
+  return clusterWideTypes.includes(type)
+}
+
 // 监听选择变化加载报告
 watch([selectedCluster, selectedNamespace, selectedReportType], async ([c, ns, type]) => {
-  if (!c || !ns || !type) return;
+  if (!c || !type) return;
+  
+  // For cluster-wide reports, don't require namespace
+  if (isClusterWideReport(type)) {
+    loading.value = true;
+    try {
+      const resp = await fetchReports(type, c, null);
+      reports.value = (resp.data || resp) ?? [];
+      page.value = 1;
+    } finally {
+      loading.value = false;
+    }
+    return;
+  }
+  
+  // For namespaced reports, require namespace
+  if (!ns) return;
   loading.value = true;
   try {
     const resp = await fetchReports(type, c, ns);
@@ -941,12 +1004,30 @@ watch([selectedCluster, selectedNamespace, selectedReportType], async ([c, ns, t
 });
 
 async function refreshReports() {
-  // 如果 clusters/selectedCluster/selectedNamespace 为空，强制重新请求
-  if (!clusters.value.length || !selectedCluster.value || !selectedNamespace.value) {
+  // 如果 clusters/selectedCluster 为空，强制重新请求
+  if (!clusters.value.length || !selectedCluster.value) {
     await loadClustersAndNamespaces(true);
   }
-  if (selectedCluster.value && selectedNamespace.value && selectedReportType.value) {
+  
+  if (selectedCluster.value && selectedReportType.value) {
     loading.value = true;
+    
+    // For cluster-wide reports, don't require namespace
+    if (isClusterWideReport(selectedReportType.value)) {
+      fetchReports(selectedReportType.value, selectedCluster.value, null, true).then(resp => {
+        reports.value = (resp.data || resp) ?? [];
+        page.value = 1;
+        loading.value = false;
+      });
+      return;
+    }
+    
+    // For namespaced reports, require namespace
+    if (!selectedNamespace.value) {
+      loading.value = false;
+      return;
+    }
+    
     fetchReports(selectedReportType.value, selectedCluster.value, selectedNamespace.value, true).then(resp => {
       reports.value = (resp.data || resp) ?? [];
       page.value = 1;

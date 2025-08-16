@@ -460,6 +460,205 @@ func UpsertReportToCache(rep Report) {
 // Global clients map (set by main.go)
 var Clients map[string]*kubernetes.Client
 
+// GetReportsByTypeAndCluster returns all cluster-wide reports for a specific type and cluster
+// @Summary List cluster-wide reports by type and cluster
+// @Description Returns all cluster-wide reports for a specific type and cluster
+// @Tags reports
+// @Produce json
+// @Param type path string true "Report type"
+// @Param cluster path string true "Cluster name"
+// @Param refresh query int false "Force refresh from k8s if 1"
+// @Success 200 {object} Response
+// @Failure 400 {object} Response
+// @Router /api/reports/{type}/{cluster} [get]
+func (h *Handler) GetReportsByTypeAndCluster(w http.ResponseWriter, r *http.Request, reportType, cluster string) {
+	refresh := r.URL.Query().Get("refresh") == "1"
+	emptyKey := fmt.Sprintf("empty:%s:%s", cluster, reportType)
+
+	// 1. 非 refresh 时优先查缓存
+	if !refresh {
+		var reports []Report
+		for k, v := range cache.Items() {
+			if strings.HasPrefix(k, "report:") {
+				var rep Report
+				switch val := v.Object.(type) {
+				case Report:
+					rep = val
+				case map[string]interface{}:
+					b, _ := json.Marshal(val)
+					_ = json.Unmarshal(b, &rep)
+				default:
+					continue
+				}
+				if rep.Cluster == cluster && rep.Type == reportType {
+					reports = append(reports, rep)
+				}
+			}
+		}
+		if len(reports) > 0 {
+			writeJSON(w, http.StatusOK, Response{
+				Code:    CodeSuccess,
+				Message: "Success (cache)",
+				Data:    reports,
+			})
+			return
+		}
+		// 查空标记
+		if _, found := cache.Get(emptyKey); found {
+			writeJSON(w, http.StatusOK, Response{
+				Code:    CodeSuccess,
+				Message: "Success (empty)",
+				Data:    []Report{},
+			})
+			return
+		}
+	}
+
+	// 2. 查 k8s
+	k8sClient := h.k8s
+	if Clients != nil {
+		if c, ok := Clients[cluster]; ok {
+			k8sClient = c
+		}
+	}
+	if k8sClient == nil {
+		writeError(w, http.StatusBadRequest, "Cluster not found")
+		return
+	}
+	reportKind := config.GetReportByName(reportType)
+	if reportKind == nil {
+		writeError(w, http.StatusBadRequest, "Invalid report type")
+		return
+	}
+	ctx := r.Context()
+	k8sReports, err := k8sClient.GetReportsByType(ctx, *reportKind, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(k8sReports) == 0 {
+		// 标记为空，下次不再查
+		cache.Set(emptyKey, true, 10*time.Minute)
+		writeJSON(w, http.StatusOK, Response{
+			Code:    CodeSuccess,
+			Message: "Success (k8s empty)",
+			Data:    []Report{},
+		})
+		return
+	}
+	// 拉到数据，写入缓存
+	var reports []Report
+	for _, rep := range k8sReports {
+		// 归一化 cluster 字段并转换为api.Report类型
+		apiReport := Report{
+			Type:      rep.Type,
+			Cluster:   cluster,
+			Namespace: rep.Namespace,
+			Name:      rep.Name,
+			Status:    rep.Status,
+			Data:      rep.Data,
+			UpdatedAt: time.Now(),
+		}
+		UpsertReportToCache(apiReport)
+		reports = append(reports, apiReport)
+	}
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success (k8s)",
+		Data:    reports,
+	})
+}
+
+// GetClusterReport returns a specific cluster-wide report
+// @Summary Get a specific cluster-wide report
+// @Description Returns a specific cluster-wide report by type, cluster, and name
+// @Tags reports
+// @Produce json
+// @Param type path string true "Report type"
+// @Param cluster path string true "Cluster name"
+// @Param name path string true "Report name"
+// @Param refresh query int false "Force refresh from k8s if 1"
+// @Success 200 {object} Response
+// @Failure 400 {object} Response
+// @Failure 404 {object} Response
+// @Router /api/reports/{type}/{cluster}/{name} [get]
+func (h *Handler) GetClusterReport(w http.ResponseWriter, r *http.Request, reportType, cluster, name string) {
+	key := reportKey(cluster, "", reportType, name)
+	refresh := r.URL.Query().Get("refresh") == "1"
+	emptyKey := fmt.Sprintf("empty:report:%s:%s:%s:%s", cluster, "", reportType, name)
+
+	if !refresh {
+		v, found := cache.Get(key)
+		if found {
+			var report Report
+			switch val := v.(type) {
+			case Report:
+				report = val
+			case map[string]interface{}:
+				b, _ := json.Marshal(val)
+				_ = json.Unmarshal(b, &report)
+			default:
+				writeError(w, http.StatusInternalServerError, "Invalid report data")
+				return
+			}
+			// 检查 Data 字段是否为完整 CRD（有 apiVersion/kind/metadata/report 字段）
+			if dataMap, ok := report.Data.(map[string]interface{}); ok {
+				if _, hasAPIVersion := dataMap["apiVersion"]; hasAPIVersion && dataMap["kind"] != nil && dataMap["metadata"] != nil && dataMap["report"] != nil {
+					// 是完整 CRD，直接返回
+					writeJSON(w, http.StatusOK, Response{
+						Code:    CodeSuccess,
+						Message: "Success (cache)",
+						Data:    report,
+					})
+					return
+				}
+			}
+			// 否则强制查 k8s
+		}
+		if _, found := cache.Get(emptyKey); found {
+			writeError(w, http.StatusNotFound, "Report not found (empty)")
+			return
+		}
+	}
+	// 查 k8s
+	k8sClient := h.k8s
+	if Clients != nil {
+		if c, ok := Clients[cluster]; ok {
+			k8sClient = c
+		}
+	}
+	if k8sClient == nil {
+		writeError(w, http.StatusBadRequest, "Cluster not found")
+		return
+	}
+	reportKind := config.GetReportByName(reportType)
+	if reportKind == nil {
+		writeError(w, http.StatusBadRequest, "Invalid report type")
+		return
+	}
+	rep, err := k8sClient.GetReportDetails(r.Context(), *reportKind, "", name)
+	if err != nil || rep == nil {
+		cache.Set(emptyKey, true, 10*time.Minute)
+		writeError(w, http.StatusNotFound, "Report not found (k8s)")
+		return
+	}
+	report := Report{
+		Type:      string(rep.Type),
+		Cluster:   cluster,
+		Namespace: rep.Namespace,
+		Name:      rep.Name,
+		Status:    rep.Status,
+		Data:      rep.Data,
+		UpdatedAt: time.Now(),
+	}
+	UpsertReportToCache(report)
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success (k8s)",
+		Data:    report,
+	})
+}
+
 // GetReportsByTypeAndNamespace returns all reports for a specific type, cluster, and namespace
 // @Summary List reports by type and namespace
 // @Description Returns all reports for a specific type, cluster, and namespace
