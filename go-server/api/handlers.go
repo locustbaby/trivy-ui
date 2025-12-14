@@ -1,4 +1,3 @@
-// API endpoint handlers
 package api
 
 import (
@@ -13,144 +12,26 @@ import (
 
 	"trivy-ui/config"
 	"trivy-ui/kubernetes"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	gocache "github.com/patrickmn/go-cache"
+	"trivy-ui/utils"
 )
 
-// Response codes
 const (
 	CodeSuccess = 0
 	CodeError   = 1
 )
 
-// Response represents the standard API response format
 type Response struct {
 	Code    int         `json:"code"`
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
 
-// writeJSON writes a JSON response
-func writeJSON(w http.ResponseWriter, code int, resp Response) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(resp)
+type PaginatedResponse struct {
+	Total    int         `json:"total"`
+	Page     int         `json:"page"`
+	PageSize int         `json:"pageSize"`
+	Data     interface{} `json:"data"`
 }
-
-// writeError writes an error response
-func writeError(w http.ResponseWriter, code int, message string) {
-	writeJSON(w, code, Response{
-		Code:    CodeError,
-		Message: message,
-	})
-}
-
-// getIntQueryParam gets an integer query parameter
-func getIntQueryParam(r *http.Request, key string, defaultValue int) int {
-	value := r.URL.Query().Get(key)
-	if value == "" {
-		return defaultValue
-	}
-	intValue, err := strconv.Atoi(value)
-	if err != nil {
-		return defaultValue
-	}
-	return intValue
-}
-
-// SpaHandler serves the Single Page Application frontend
-func SpaHandler(staticPath string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// If the request is for an API endpoint, return 404
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.NotFound(w, r)
-			return
-		}
-
-		// Try to serve the requested file
-		path := filepath.Join(staticPath, r.URL.Path)
-		_, err := os.Stat(path)
-		if err != nil {
-			// If the file doesn't exist, serve index.html
-			http.ServeFile(w, r, filepath.Join(staticPath, "index.html"))
-			return
-		}
-
-		// Serve the file
-		http.ServeFile(w, r, path)
-	}
-}
-
-// 全局 cache 实例
-var cache = gocache.New(24*time.Hour, 1*time.Hour)
-var cacheFile = "cache.json"
-
-// 启动时加载本地缓存
-func LoadCache() {
-	if _, err := os.Stat(cacheFile); err == nil {
-		data, _ := os.ReadFile(cacheFile)
-		var items map[string]gocache.Item
-		if err := json.Unmarshal(data, &items); err == nil {
-			cache.Items() // 触发初始化
-			for k, v := range items {
-				// Convert int64 expiration to time.Duration
-				expiration := time.Duration(v.Expiration) * time.Second
-				cache.Set(k, v.Object, expiration)
-			}
-		}
-	}
-}
-
-// 定时持久化缓存
-func SaveCache() {
-	data, _ := json.MarshalIndent(cache.Items(), "", "  ")
-	_ = os.WriteFile(cacheFile, data, 0644)
-}
-
-func init() {
-	LoadCache()
-	go func() {
-		for {
-			SaveCache()
-			time.Sleep(60 * time.Second)
-		}
-	}()
-}
-
-// Handler handles API requests
-type Handler struct {
-	k8s *kubernetes.Client
-}
-
-// NewHandler creates a new handler
-func NewHandler(k8sClient *kubernetes.Client) *Handler {
-	return &Handler{
-		k8s: k8sClient,
-	}
-}
-
-// GetReportTypes returns all available report types
-// @Summary Get all report types
-// @Description Returns all available Trivy report types
-// @Tags reports
-// @Produce json
-// @Success 200 {object} Response
-// @Router /api/report-types [get]
-func (h *Handler) GetReportTypes(w http.ResponseWriter, r *http.Request) {
-	var reportTypes []string
-	for _, report := range config.AllReports {
-		reportTypes = append(reportTypes, report.Name)
-	}
-	writeJSON(w, http.StatusOK, Response{
-		Code:    CodeSuccess,
-		Message: "Success",
-		Data:    reportTypes,
-	})
-}
-
-// 定义 Cluster/Namespace/Report 结构体
 
 type Cluster struct {
 	Name        string `json:"name"`
@@ -173,31 +54,124 @@ type Report struct {
 	UpdatedAt time.Time   `json:"updated_at"`
 }
 
-// 组合 key 工具
-func clusterKey(name string) string          { return "cluster:" + name }
-func namespaceKey(cluster, ns string) string { return fmt.Sprintf("namespace:%s:%s", cluster, ns) }
-func reportKey(cluster, ns, typ, name string) string {
-	return fmt.Sprintf("report:%s:%s:%s:%s", cluster, ns, typ, name)
+type Handler struct {
+	cache CacheService
 }
 
-// GetClusters returns all clusters
-// @Summary Get all clusters
-// @Description Returns all clusters (from cache or k8s)
-// @Tags clusters
-// @Produce json
-// @Param refresh query int false "Force refresh from k8s if 1"
-// @Success 200 {object} Response
-// @Router /api/clusters [get]
+type CacheService interface {
+	Get(key string) (interface{}, bool)
+	Items() map[string]interface{}
+	Set(key string, value interface{}, expiration time.Duration)
+	Delete(key string)
+}
+
+type cacheServiceImpl struct{}
+
+func (c *cacheServiceImpl) Get(key string) (interface{}, bool) {
+	return getCache().Get(key)
+}
+
+func (c *cacheServiceImpl) Items() map[string]interface{} {
+	return getCache().Items()
+}
+
+func (c *cacheServiceImpl) Set(key string, value interface{}, expiration time.Duration) {
+	getCache().Set(key, value, expiration)
+}
+
+func (c *cacheServiceImpl) Delete(key string) {
+	getCache().Delete(key)
+}
+
+func NewHandler(k8sClient *kubernetes.Client) *Handler {
+	return &Handler{
+		cache: &cacheServiceImpl{},
+	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, resp Response) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func writeError(w http.ResponseWriter, code int, message string) {
+	writeJSON(w, code, Response{
+		Code:    CodeError,
+		Message: message,
+	})
+}
+
+func SpaHandler(staticPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+		path := filepath.Join(staticPath, r.URL.Path)
+		_, err := os.Stat(path)
+		if err != nil {
+			http.ServeFile(w, r, filepath.Join(staticPath, "index.html"))
+			return
+		}
+		http.ServeFile(w, r, path)
+	}
+}
+
+func LoadCache() error {
+	return InitCache()
+}
+
+func ReportKey(cluster, ns, typ, name string) string {
+	return reportKey(cluster, ns, typ, name)
+}
+
+func (h *Handler) refreshCRDRegistry() {
+	registry := config.GetGlobalRegistry()
+	clients := GetAllClusterClients()
+	if len(clients) > 0 {
+		for _, cc := range clients {
+			if cc.Client != nil && cc.Client.Config() != nil {
+				if err := registry.RefreshIfNeeded(cc.Client.Config()); err != nil {
+					utils.LogWarning("Failed to refresh CRDs", map[string]interface{}{"error": err.Error()})
+				}
+				break
+			}
+		}
+	}
+}
+
+func (h *Handler) GetReportTypes(w http.ResponseWriter, r *http.Request) {
+	h.refreshCRDRegistry()
+	reportTypes := config.AllReports()
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    reportTypes,
+	})
+}
+
+func (h *Handler) GetTypesV1(w http.ResponseWriter, r *http.Request) {
+	h.refreshCRDRegistry()
+	reportTypes := config.AllReports()
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    reportTypes,
+	})
+}
+
 func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 	refresh := r.URL.Query().Get("refresh") == "1"
 	emptyKey := "empty:clusters"
 
 	if !refresh {
 		var clusters []Cluster
-		for k, v := range cache.Items() {
+		items := h.cache.Items()
+		for k, v := range items {
 			if strings.HasPrefix(k, "cluster:") {
 				var cluster Cluster
-				switch val := v.Object.(type) {
+				switch val := v.(type) {
 				case Cluster:
 					cluster = val
 				case map[string]interface{}:
@@ -217,7 +191,7 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if _, found := cache.Get(emptyKey); found {
+		if _, found := h.cache.Get(emptyKey); found {
 			writeJSON(w, http.StatusOK, Response{
 				Code:    CodeSuccess,
 				Message: "Success (empty)",
@@ -226,27 +200,19 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 查 k8s
+
 	var clusters []Cluster
-	if Clients != nil {
-		for name, k8sClient := range Clients {
-			nodeList, err := k8sClient.Clientset().CoreV1().Nodes().List(r.Context(), metav1.ListOptions{})
-			if err == nil {
-				version := ""
-				if len(nodeList.Items) > 0 {
-					version = nodeList.Items[0].Status.NodeInfo.KubeletVersion
-				}
-				clusterInfo := Cluster{
-					Name:        name,
-					Description: fmt.Sprintf("%d nodes, version: %s", len(nodeList.Items), version),
-				}
-				UpsertClusterToCache(clusterInfo)
-				clusters = append(clusters, clusterInfo)
-			}
+	clusterClients := GetAllClusterClients()
+	for name, cc := range clusterClients {
+		clusterInfo := Cluster{
+			Name:        name,
+			Description: fmt.Sprintf("API Server: %s, version: %s", cc.APIServerURL, cc.Version),
 		}
+		UpsertClusterToCache(clusterInfo)
+		clusters = append(clusters, clusterInfo)
 	}
 	if len(clusters) == 0 {
-		cache.Set(emptyKey, true, 10*time.Minute)
+		h.cache.Set(emptyKey, true, 10*time.Second)
 		writeJSON(w, http.StatusOK, Response{
 			Code:    CodeSuccess,
 			Message: "Success (k8s empty)",
@@ -261,26 +227,17 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetNamespacesByCluster returns all namespaces for a specific cluster
-// @Summary Get namespaces by cluster
-// @Description Returns all namespaces for a specific cluster (from cache or k8s)
-// @Tags namespaces
-// @Produce json
-// @Param cluster path string true "Cluster name"
-// @Param refresh query int false "Force refresh from k8s if 1"
-// @Success 200 {object} Response
-// @Failure 400 {object} Response
-// @Router /api/clusters/{cluster}/namespaces [get]
 func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request, cluster string) {
 	refresh := r.URL.Query().Get("refresh") == "1"
 	emptyKey := fmt.Sprintf("empty:namespaces:%s", cluster)
 
 	if !refresh {
 		var namespaces []Namespace
-		for k, v := range cache.Items() {
+		items := h.cache.Items()
+		for k, v := range items {
 			if strings.HasPrefix(k, "namespace:") {
 				var ns Namespace
-				switch val := v.Object.(type) {
+				switch val := v.(type) {
 				case Namespace:
 					ns = val
 				case map[string]interface{}:
@@ -302,7 +259,7 @@ func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request,
 			})
 			return
 		}
-		if _, found := cache.Get(emptyKey); found {
+		if _, found := h.cache.Get(emptyKey); found {
 			writeJSON(w, http.StatusOK, Response{
 				Code:    CodeSuccess,
 				Message: "Success (empty)",
@@ -311,20 +268,15 @@ func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	// 查 k8s
-	k8sClient := h.k8s
-	if Clients != nil {
-		if c, ok := Clients[cluster]; ok {
-			k8sClient = c
-		}
-	}
-	if k8sClient == nil {
+
+	clusterClient := GetClusterClient(cluster)
+	if clusterClient == nil {
 		writeError(w, http.StatusBadRequest, "Cluster not found")
 		return
 	}
-	nsList, err := k8sClient.GetNamespaces(r.Context())
+	nsList, err := clusterClient.Client.GetNamespaces(r.Context())
 	if err != nil || len(nsList) == 0 {
-		cache.Set(emptyKey, true, 10*time.Minute)
+		h.cache.Set(emptyKey, true, 10*time.Second)
 		writeJSON(w, http.StatusOK, Response{
 			Code:    CodeSuccess,
 			Message: "Success (k8s empty)",
@@ -345,426 +297,340 @@ func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-// GetReport returns a specific report
-// @Summary Get a specific report
-// @Description Returns a specific report by type, cluster, namespace, and name
-// @Tags reports
-// @Produce json
-// @Param type path string true "Report type"
-// @Param cluster path string true "Cluster name"
-// @Param namespace path string true "Namespace"
-// @Param name path string true "Report name"
-// @Param refresh query int false "Force refresh from k8s if 1"
-// @Success 200 {object} Response
-// @Failure 400 {object} Response
-// @Failure 404 {object} Response
-// @Router /api/reports/{type}/{cluster}/{namespace}/{name} [get]
-func (h *Handler) GetReport(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/reports/"), "/")
-	if len(parts) != 4 {
-		writeError(w, http.StatusBadRequest, "Invalid URL format")
-		return
+func (h *Handler) parseReportKey(key string) (cluster, namespace, reportType, reportName string, ok bool) {
+	prefix := "report:"
+	if !strings.HasPrefix(key, prefix) {
+		return "", "", "", "", false
 	}
-	reportTypeStr := parts[0]
-	cluster := parts[1]
-	namespace := parts[2]
-	name := parts[3]
-	key := reportKey(cluster, namespace, reportTypeStr, name)
-	refresh := r.URL.Query().Get("refresh") == "1"
-	emptyKey := fmt.Sprintf("empty:report:%s:%s:%s:%s", cluster, namespace, reportTypeStr, name)
+	keyWithoutPrefix := strings.TrimPrefix(key, prefix)
+	parts := strings.Split(keyWithoutPrefix, ":")
+	if len(parts) < 4 {
+		return "", "", "", "", false
+	}
+	cluster = parts[0]
+	namespace = parts[1]
+	reportType = parts[2]
+	reportName = strings.Join(parts[3:], ":")
+	return cluster, namespace, reportType, reportName, true
+}
 
-	if !refresh {
-		v, found := cache.Get(key)
-		if found {
-			var report Report
-			switch val := v.(type) {
-			case Report:
-				report = val
-			case map[string]interface{}:
-				b, _ := json.Marshal(val)
-				_ = json.Unmarshal(b, &report)
-			default:
-				writeError(w, http.StatusInternalServerError, "Invalid report data")
-				return
-			}
-			// 检查 Data 字段是否为完整 CRD（有 apiVersion/kind/metadata/report 字段）
-			if dataMap, ok := report.Data.(map[string]interface{}); ok {
-				if _, hasAPIVersion := dataMap["apiVersion"]; hasAPIVersion && dataMap["kind"] != nil && dataMap["metadata"] != nil && dataMap["report"] != nil {
-					// 是完整 CRD，直接返回
-					writeJSON(w, http.StatusOK, Response{
-						Code:    CodeSuccess,
-						Message: "Success (cache)",
-						Data:    report,
-					})
-					return
+func (h *Handler) parseQueryParams(r *http.Request) (clusterFilter string, namespaceFilters []string, page, pageSize int) {
+	clusterFilter = r.URL.Query().Get("cluster")
+	namespaceParam := r.URL.Query().Get("namespace")
+	if namespaceParam != "" {
+		namespaceFilters = strings.Split(namespaceParam, ",")
+		for i, ns := range namespaceFilters {
+			namespaceFilters[i] = strings.TrimSpace(ns)
+		}
+	}
+	page = 1
+	pageSize = 50
+	if p := r.URL.Query().Get("page"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+	if ps := r.URL.Query().Get("pageSize"); ps != "" {
+		if parsed, err := strconv.Atoi(ps); err == nil && parsed > 0 && parsed <= 200 {
+			pageSize = parsed
+		}
+	}
+	return clusterFilter, namespaceFilters, page, pageSize
+}
+
+func (h *Handler) getReportsFromCache(typeName, clusterFilter string, namespaceFilters []string) []Report {
+	var reports []Report
+	items := h.cache.Items()
+
+	utils.LogDebug("getReportsFromCache", map[string]interface{}{
+		"typeName":         typeName,
+		"clusterFilter":    clusterFilter,
+		"namespaceFilters": namespaceFilters,
+		"total_items":      len(items),
+	})
+
+	for k, v := range items {
+		cluster, namespace, reportType, reportName, ok := h.parseReportKey(k)
+		if !ok {
+			continue
+		}
+		if reportType != typeName {
+			continue
+		}
+		if clusterFilter != "" && cluster != clusterFilter {
+			continue
+		}
+		if len(namespaceFilters) > 0 {
+			// For cluster-scoped reports (namespace is empty), always include them
+			if namespace == "" {
+				// Cluster-scoped report: include regardless of namespace filters
+			} else {
+				// Namespaced report: apply namespace filters
+				hasAll := false
+				matched := false
+				for _, nf := range namespaceFilters {
+					if nf == "all" {
+						hasAll = true
+						break
+					}
+					if namespace == nf {
+						matched = true
+						break
+					}
+				}
+				if !hasAll && !matched {
+					continue
 				}
 			}
-			// 否则强制查 k8s
 		}
-		if _, found := cache.Get(emptyKey); found {
-			writeError(w, http.StatusNotFound, "Report not found (empty)")
-			return
+
+		var report Report
+		switch val := v.(type) {
+		case Report:
+			report = val
+		case map[string]interface{}:
+			b, err := json.Marshal(val)
+			if err != nil {
+				utils.LogWarning("Failed to marshal report", map[string]interface{}{"key": k, "error": err.Error()})
+				continue
+			}
+			if err := json.Unmarshal(b, &report); err != nil {
+				utils.LogWarning("Failed to unmarshal report", map[string]interface{}{"key": k, "error": err.Error()})
+				continue
+			}
+		default:
+			utils.LogWarning("Unexpected report type", map[string]interface{}{"key": k, "type": fmt.Sprintf("%T", v)})
+			continue
 		}
-	}
-	// 查 k8s
-	k8sClient := h.k8s
-	if Clients != nil {
-		if c, ok := Clients[cluster]; ok {
-			k8sClient = c
+
+		if report.Type == "" {
+			report.Type = reportType
 		}
+		if report.Cluster == "" {
+			report.Cluster = cluster
+		}
+		if report.Namespace == "" {
+			report.Namespace = namespace
+		}
+		if report.Name == "" {
+			report.Name = reportName
+		}
+		reports = append(reports, report)
 	}
-	if k8sClient == nil {
-		writeError(w, http.StatusBadRequest, "Cluster not found")
-		return
-	}
-	reportKind := config.GetReportByName(reportTypeStr)
+
+	utils.LogDebug("getReportsFromCache result", map[string]interface{}{
+		"typeName": typeName,
+		"count":    len(reports),
+	})
+
+	return reports
+}
+
+func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typeName string) {
+	reportKind := config.GetReportByName(typeName)
 	if reportKind == nil {
 		writeError(w, http.StatusBadRequest, "Invalid report type")
 		return
 	}
-	rep, err := k8sClient.GetReportDetails(r.Context(), *reportKind, namespace, name)
-	if err != nil || rep == nil {
-		cache.Set(emptyKey, true, 10*time.Minute)
-		writeError(w, http.StatusNotFound, "Report not found (k8s)")
-		return
+
+	clusterFilter, namespaceFilters, page, pageSize := h.parseQueryParams(r)
+	// For cluster-scoped reports, ignore namespace filters
+	if reportKind != nil && !reportKind.Namespaced {
+		namespaceFilters = []string{}
 	}
-	report := Report{
-		Type:      string(rep.Type),
-		Cluster:   cluster,
-		Namespace: rep.Namespace,
-		Name:      rep.Name,
-		Status:    rep.Status,
-		Data:      rep.Data,
-		UpdatedAt: time.Now(),
+	allReports := h.getReportsFromCache(typeName, clusterFilter, namespaceFilters)
+
+	total := len(allReports)
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if start > total {
+		start = total
 	}
-	UpsertReportToCache(report)
+	if end > total {
+		end = total
+	}
+
+	var paginatedReports []Report
+	if start < total {
+		if end <= len(allReports) {
+			paginatedReports = allReports[start:end]
+		} else {
+			paginatedReports = allReports[start:]
+		}
+	} else {
+		paginatedReports = []Report{}
+	}
+
+	utils.LogInfo("GetReportsByTypeV1", map[string]interface{}{
+		"typeName":         typeName,
+		"clusterFilter":    clusterFilter,
+		"namespaceFilters": namespaceFilters,
+		"total":            total,
+		"page":             page,
+		"pageSize":         pageSize,
+		"returned":         len(paginatedReports),
+	})
+
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
-		Message: "Success (k8s)",
-		Data:    report,
+		Message: "Success",
+		Data: PaginatedResponse{
+			Total:    total,
+			Page:     page,
+			PageSize: pageSize,
+			Data:     paginatedReports,
+		},
 	})
+}
+
+func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typeName, reportName string) {
+	reportKind := config.GetReportByName(typeName)
+	if reportKind == nil {
+		writeError(w, http.StatusBadRequest, "Invalid report type")
+		return
+	}
+
+	clusterFilter, namespaceFilters, _, _ := h.parseQueryParams(r)
+	items := h.cache.Items()
+	for k, v := range items {
+		cluster, namespace, reportType, reportNameFromKey, ok := h.parseReportKey(k)
+		if !ok {
+			continue
+		}
+		if reportType != typeName || reportNameFromKey != reportName {
+			continue
+		}
+		if clusterFilter != "" && cluster != clusterFilter {
+			continue
+		}
+		if len(namespaceFilters) > 0 {
+			hasAll := false
+			matched := false
+			for _, nf := range namespaceFilters {
+				if nf == "all" {
+					hasAll = true
+					break
+				}
+				if namespace == nf {
+					matched = true
+					break
+				}
+			}
+			if !hasAll && !matched {
+				continue
+			}
+		}
+
+		var report Report
+		switch val := v.(type) {
+		case Report:
+			report = val
+		case map[string]interface{}:
+			b, err := json.Marshal(val)
+			if err != nil {
+				continue
+			}
+			if err := json.Unmarshal(b, &report); err != nil {
+				continue
+			}
+		default:
+			continue
+		}
+
+		if report.Type == "" {
+			report.Type = reportType
+		}
+		if report.Cluster == "" {
+			report.Cluster = cluster
+		}
+		if report.Namespace == "" {
+			report.Namespace = namespace
+		}
+		if report.Name == "" {
+			report.Name = reportNameFromKey
+		}
+
+		// Check if report data has vulnerabilities, if not fetch from Kubernetes
+		hasVulnerabilities := false
+		if reportData, ok := report.Data.(map[string]interface{}); ok {
+			// Check if it's the full Kubernetes object structure (has "report" field with vulnerabilities)
+			if reportObj, ok := reportData["report"].(map[string]interface{}); ok {
+				if vulnerabilities, ok := reportObj["vulnerabilities"]; ok {
+					if vulnArray, ok := vulnerabilities.([]interface{}); ok && len(vulnArray) > 0 {
+						hasVulnerabilities = true
+					}
+				}
+			} else {
+				// No "report" field means it's simplified data
+				// Simplified data structure: {summary: {...}, repository: "...", scanner: "..."}
+				// Full data structure: {report: {vulnerabilities: [...], summary: {...}}}
+				hasVulnerabilities = false
+			}
+		}
+
+		if !hasVulnerabilities {
+			// Fetch full report from Kubernetes
+			clusterClient := GetClusterClient(cluster)
+			if clusterClient != nil {
+				utils.LogInfo("Fetching full report from Kubernetes", map[string]interface{}{
+					"cluster":   cluster,
+					"namespace": namespace,
+					"type":      typeName,
+					"name":      reportNameFromKey,
+				})
+				fullReport, err := clusterClient.Client.GetReportDetails(r.Context(), *reportKind, namespace, reportNameFromKey)
+				if err == nil && fullReport != nil {
+					report.Data = fullReport.Data
+					report.Status = fullReport.Status
+					// Update cache with full data
+					UpsertReportToCache(report)
+					utils.LogInfo("Fetched full report from Kubernetes", map[string]interface{}{
+						"cluster":   cluster,
+						"namespace": namespace,
+						"type":      typeName,
+						"name":      reportNameFromKey,
+					})
+				} else {
+					utils.LogWarning("Failed to fetch full report from Kubernetes", map[string]interface{}{
+						"cluster":   cluster,
+						"namespace": namespace,
+						"type":      typeName,
+						"name":      reportNameFromKey,
+						"error":     err,
+					})
+				}
+			} else {
+				utils.LogWarning("Cluster client not found", map[string]interface{}{
+					"cluster": cluster,
+				})
+			}
+		}
+
+		writeJSON(w, http.StatusOK, Response{
+			Code:    CodeSuccess,
+			Message: "Success",
+			Data:    report,
+		})
+		return
+	}
+
+	writeError(w, http.StatusNotFound, "Report not found")
 }
 
 func UpsertClusterToCache(cluster Cluster) {
-	cache.Set(clusterKey(cluster.Name), cluster, gocache.DefaultExpiration)
+	if cache != nil {
+		cache.Set(clusterKey(cluster.Name), cluster, 10*time.Second)
+	}
 }
 
 func UpsertNamespaceToCache(ns Namespace) {
-	cache.Set(namespaceKey(ns.Cluster, ns.Name), ns, gocache.DefaultExpiration)
+	if cache != nil {
+		cache.Set(namespaceKey(ns.Cluster, ns.Name), ns, 10*time.Second)
+	}
 }
 
 func UpsertReportToCache(rep Report) {
-	cache.Set(reportKey(rep.Cluster, rep.Namespace, rep.Type, rep.Name), rep, gocache.DefaultExpiration)
-}
-
-// Global clients map (set by main.go)
-var Clients map[string]*kubernetes.Client
-
-// GetReportsByTypeAndCluster returns all cluster-wide reports for a specific type and cluster
-// @Summary List cluster-wide reports by type and cluster
-// @Description Returns all cluster-wide reports for a specific type and cluster
-// @Tags reports
-// @Produce json
-// @Param type path string true "Report type"
-// @Param cluster path string true "Cluster name"
-// @Param refresh query int false "Force refresh from k8s if 1"
-// @Success 200 {object} Response
-// @Failure 400 {object} Response
-// @Router /api/reports/{type}/{cluster} [get]
-func (h *Handler) GetReportsByTypeAndCluster(w http.ResponseWriter, r *http.Request, reportType, cluster string) {
-	refresh := r.URL.Query().Get("refresh") == "1"
-	emptyKey := fmt.Sprintf("empty:%s:%s", cluster, reportType)
-
-	// 1. 非 refresh 时优先查缓存
-	if !refresh {
-		var reports []Report
-		for k, v := range cache.Items() {
-			if strings.HasPrefix(k, "report:") {
-				var rep Report
-				switch val := v.Object.(type) {
-				case Report:
-					rep = val
-				case map[string]interface{}:
-					b, _ := json.Marshal(val)
-					_ = json.Unmarshal(b, &rep)
-				default:
-					continue
-				}
-				if rep.Cluster == cluster && rep.Type == reportType {
-					reports = append(reports, rep)
-				}
-			}
-		}
-		if len(reports) > 0 {
-			writeJSON(w, http.StatusOK, Response{
-				Code:    CodeSuccess,
-				Message: "Success (cache)",
-				Data:    reports,
-			})
-			return
-		}
-		// 查空标记
-		if _, found := cache.Get(emptyKey); found {
-			writeJSON(w, http.StatusOK, Response{
-				Code:    CodeSuccess,
-				Message: "Success (empty)",
-				Data:    []Report{},
-			})
-			return
-		}
+	if cache != nil {
+		cache.Set(reportKey(rep.Cluster, rep.Namespace, rep.Type, rep.Name), rep, 7*24*time.Hour)
 	}
-
-	// 2. 查 k8s
-	k8sClient := h.k8s
-	if Clients != nil {
-		if c, ok := Clients[cluster]; ok {
-			k8sClient = c
-		}
-	}
-	if k8sClient == nil {
-		writeError(w, http.StatusBadRequest, "Cluster not found")
-		return
-	}
-	reportKind := config.GetReportByName(reportType)
-	if reportKind == nil {
-		writeError(w, http.StatusBadRequest, "Invalid report type")
-		return
-	}
-	ctx := r.Context()
-	k8sReports, err := k8sClient.GetReportsByType(ctx, *reportKind, "")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if len(k8sReports) == 0 {
-		// 标记为空，下次不再查
-		cache.Set(emptyKey, true, 10*time.Minute)
-		writeJSON(w, http.StatusOK, Response{
-			Code:    CodeSuccess,
-			Message: "Success (k8s empty)",
-			Data:    []Report{},
-		})
-		return
-	}
-	// 拉到数据，写入缓存
-	var reports []Report
-	for _, rep := range k8sReports {
-		// 归一化 cluster 字段并转换为api.Report类型
-		apiReport := Report{
-			Type:      rep.Type,
-			Cluster:   cluster,
-			Namespace: rep.Namespace,
-			Name:      rep.Name,
-			Status:    rep.Status,
-			Data:      rep.Data,
-			UpdatedAt: time.Now(),
-		}
-		UpsertReportToCache(apiReport)
-		reports = append(reports, apiReport)
-	}
-	writeJSON(w, http.StatusOK, Response{
-		Code:    CodeSuccess,
-		Message: "Success (k8s)",
-		Data:    reports,
-	})
-}
-
-// GetClusterReport returns a specific cluster-wide report
-// @Summary Get a specific cluster-wide report
-// @Description Returns a specific cluster-wide report by type, cluster, and name
-// @Tags reports
-// @Produce json
-// @Param type path string true "Report type"
-// @Param cluster path string true "Cluster name"
-// @Param name path string true "Report name"
-// @Param refresh query int false "Force refresh from k8s if 1"
-// @Success 200 {object} Response
-// @Failure 400 {object} Response
-// @Failure 404 {object} Response
-// @Router /api/reports/{type}/{cluster}/{name} [get]
-func (h *Handler) GetClusterReport(w http.ResponseWriter, r *http.Request, reportType, cluster, name string) {
-	key := reportKey(cluster, "", reportType, name)
-	refresh := r.URL.Query().Get("refresh") == "1"
-	emptyKey := fmt.Sprintf("empty:report:%s:%s:%s:%s", cluster, "", reportType, name)
-
-	if !refresh {
-		v, found := cache.Get(key)
-		if found {
-			var report Report
-			switch val := v.(type) {
-			case Report:
-				report = val
-			case map[string]interface{}:
-				b, _ := json.Marshal(val)
-				_ = json.Unmarshal(b, &report)
-			default:
-				writeError(w, http.StatusInternalServerError, "Invalid report data")
-				return
-			}
-			// 检查 Data 字段是否为完整 CRD（有 apiVersion/kind/metadata/report 字段）
-			if dataMap, ok := report.Data.(map[string]interface{}); ok {
-				if _, hasAPIVersion := dataMap["apiVersion"]; hasAPIVersion && dataMap["kind"] != nil && dataMap["metadata"] != nil && dataMap["report"] != nil {
-					// 是完整 CRD，直接返回
-					writeJSON(w, http.StatusOK, Response{
-						Code:    CodeSuccess,
-						Message: "Success (cache)",
-						Data:    report,
-					})
-					return
-				}
-			}
-			// 否则强制查 k8s
-		}
-		if _, found := cache.Get(emptyKey); found {
-			writeError(w, http.StatusNotFound, "Report not found (empty)")
-			return
-		}
-	}
-	// 查 k8s
-	k8sClient := h.k8s
-	if Clients != nil {
-		if c, ok := Clients[cluster]; ok {
-			k8sClient = c
-		}
-	}
-	if k8sClient == nil {
-		writeError(w, http.StatusBadRequest, "Cluster not found")
-		return
-	}
-	reportKind := config.GetReportByName(reportType)
-	if reportKind == nil {
-		writeError(w, http.StatusBadRequest, "Invalid report type")
-		return
-	}
-	rep, err := k8sClient.GetReportDetails(r.Context(), *reportKind, "", name)
-	if err != nil || rep == nil {
-		cache.Set(emptyKey, true, 10*time.Minute)
-		writeError(w, http.StatusNotFound, "Report not found (k8s)")
-		return
-	}
-	report := Report{
-		Type:      string(rep.Type),
-		Cluster:   cluster,
-		Namespace: rep.Namespace,
-		Name:      rep.Name,
-		Status:    rep.Status,
-		Data:      rep.Data,
-		UpdatedAt: time.Now(),
-	}
-	UpsertReportToCache(report)
-	writeJSON(w, http.StatusOK, Response{
-		Code:    CodeSuccess,
-		Message: "Success (k8s)",
-		Data:    report,
-	})
-}
-
-// GetReportsByTypeAndNamespace returns all reports for a specific type, cluster, and namespace
-// @Summary List reports by type and namespace
-// @Description Returns all reports for a specific type, cluster, and namespace
-// @Tags reports
-// @Produce json
-// @Param type path string true "Report type"
-// @Param cluster path string true "Cluster name"
-// @Param namespace path string true "Namespace"
-// @Param refresh query int false "Force refresh from k8s if 1"
-// @Success 200 {object} Response
-// @Failure 400 {object} Response
-// @Router /api/reports/{type}/{cluster}/{namespace} [get]
-func (h *Handler) GetReportsByTypeAndNamespace(w http.ResponseWriter, r *http.Request, reportType, cluster, namespace string) {
-	refresh := r.URL.Query().Get("refresh") == "1"
-	emptyKey := fmt.Sprintf("empty:%s:%s:%s", cluster, namespace, reportType)
-
-	// 1. 非 refresh 时优先查缓存
-	if !refresh {
-		var reports []Report
-		for k, v := range cache.Items() {
-			if strings.HasPrefix(k, "report:") {
-				var rep Report
-				switch val := v.Object.(type) {
-				case Report:
-					rep = val
-				case map[string]interface{}:
-					b, _ := json.Marshal(val)
-					_ = json.Unmarshal(b, &rep)
-				default:
-					continue
-				}
-				if rep.Cluster == cluster && rep.Namespace == namespace && rep.Type == reportType {
-					reports = append(reports, rep)
-				}
-			}
-		}
-		if len(reports) > 0 {
-			writeJSON(w, http.StatusOK, Response{
-				Code:    CodeSuccess,
-				Message: "Success (cache)",
-				Data:    reports,
-			})
-			return
-		}
-		// 查空标记
-		if _, found := cache.Get(emptyKey); found {
-			writeJSON(w, http.StatusOK, Response{
-				Code:    CodeSuccess,
-				Message: "Success (empty)",
-				Data:    []Report{},
-			})
-			return
-		}
-	}
-
-	// 2. 查 k8s
-	k8sClient := h.k8s
-	if Clients != nil {
-		if c, ok := Clients[cluster]; ok {
-			k8sClient = c
-		}
-	}
-	if k8sClient == nil {
-		writeError(w, http.StatusBadRequest, "Cluster not found")
-		return
-	}
-	reportKind := config.GetReportByName(reportType)
-	if reportKind == nil {
-		writeError(w, http.StatusBadRequest, "Invalid report type")
-		return
-	}
-	ctx := r.Context()
-	k8sReports, err := k8sClient.GetReportsByType(ctx, *reportKind, namespace)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if len(k8sReports) == 0 {
-		// 标记为空，下次不再查
-		cache.Set(emptyKey, true, 10*time.Minute)
-		writeJSON(w, http.StatusOK, Response{
-			Code:    CodeSuccess,
-			Message: "Success (k8s empty)",
-			Data:    []Report{},
-		})
-		return
-	}
-	// 拉到数据，写入缓存
-	var reports []Report
-	for _, rep := range k8sReports {
-		// 归一化 cluster 字段
-		localRep := Report{
-			Type:      string(rep.Type),
-			Cluster:   cluster,
-			Namespace: rep.Namespace,
-			Name:      rep.Name,
-			Status:    rep.Status,
-			Data:      rep.Data,
-			UpdatedAt: time.Now(),
-		}
-		UpsertReportToCache(localRep)
-		reports = append(reports, localRep)
-	}
-	writeJSON(w, http.StatusOK, Response{
-		Code:    CodeSuccess,
-		Message: "Success (k8s)",
-		Data:    reports,
-	})
 }
