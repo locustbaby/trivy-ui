@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -20,14 +21,13 @@ import (
 	"trivy-ui/config"
 )
 
-// Client represents a Kubernetes client
 type Client struct {
 	clientset *kubernetes.Clientset
 	dynamic   dynamic.Interface
 	config    *rest.Config
+	informer  *ReportInformerManager
 }
 
-// NewClient creates a new Kubernetes client
 func NewClient(kubeconfig string) (*Client, error) {
 	var config *rest.Config
 	var err error
@@ -44,7 +44,7 @@ func NewClient(kubeconfig string) (*Client, error) {
 		}
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err == nil {
-			// 获取context名
+
 			if rawConfig, err2 := clientcmd.LoadFromFile(kubeconfig); err2 == nil {
 				contextName = rawConfig.CurrentContext
 				if contextName != "" {
@@ -70,7 +70,6 @@ func NewClient(kubeconfig string) (*Client, error) {
 		return nil, err
 	}
 
-	// 只初始化 client，不再写入 DB
 	return &Client{
 		clientset: clientset,
 		dynamic:   dynamicClient,
@@ -78,7 +77,6 @@ func NewClient(kubeconfig string) (*Client, error) {
 	}, nil
 }
 
-// GetNamespaces returns all namespaces in the cluster
 func (c *Client) GetNamespaces(ctx context.Context) ([]string, error) {
 	namespaces, err := c.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -92,31 +90,42 @@ func (c *Client) GetNamespaces(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
-// ListReports returns a list of reports of the specified type in the namespace
+func parseAPIVersion(apiVersion string) (group, version string) {
+	group = "aquasecurity.github.io"
+	version = "v1alpha1"
+	if apiVersion != "" {
+		parts := strings.Split(apiVersion, "/")
+		if len(parts) == 2 {
+			group = parts[0]
+			version = parts[1]
+		}
+	}
+	return group, version
+}
+
 func (c *Client) ListReports(ctx context.Context, reportType config.ReportKind, namespace string) ([]unstructured.Unstructured, error) {
-	// Skip cluster-wide reports when namespace is specified
+
 	if namespace != "" && !reportType.Namespaced {
 		return nil, nil
 	}
 
-	// Create dynamic client for the report type
+	group, version := parseAPIVersion(reportType.APIVersion)
+
 	gvr := schema.GroupVersionResource{
-		Group:    "aquasecurity.github.io",
-		Version:  "v1alpha1",
+		Group:    group,
+		Version:  version,
 		Resource: reportType.Name,
 	}
 
-	// List reports
 	var list *unstructured.UnstructuredList
 	var err error
 	if reportType.Namespaced {
 		list, err = c.dynamic.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
-		fmt.Println("List reports in namespace:", namespace)
 	} else {
 		list, err = c.dynamic.Resource(gvr).List(ctx, metav1.ListOptions{})
 	}
 	if err != nil {
-		// Skip if the CRD is not installed
+
 		if errors.IsNotFound(err) {
 			return nil, nil
 		}
@@ -126,7 +135,6 @@ func (c *Client) ListReports(ctx context.Context, reportType config.ReportKind, 
 	return list.Items, nil
 }
 
-// Report is a local struct for report data (替代 data.Report)
 type Report struct {
 	Type      string      `json:"type"`
 	Cluster   string      `json:"cluster"`
@@ -136,11 +144,9 @@ type Report struct {
 	Data      interface{} `json:"data"`
 }
 
-// GetReportsByType returns reports of a specific type in the namespace
 func (c *Client) GetReportsByType(ctx context.Context, reportType config.ReportKind, namespace string) ([]Report, error) {
 	var reports []Report
 
-	// List reports of this type
 	items, err := c.ListReports(ctx, reportType, namespace)
 	if err != nil {
 		return nil, err
@@ -157,7 +163,7 @@ func (c *Client) GetReportsByType(ctx context.Context, reportType config.ReportK
 		tag := ""
 		scanner := ""
 		age := ""
-		// Try to extract summary fields
+
 		if reportObj, found, _ := unstructured.NestedMap(item.Object, "report"); found {
 			if sum, found, _ := unstructured.NestedMap(reportObj, "summary"); found {
 				for k, v := range sum {
@@ -200,7 +206,7 @@ func (c *Client) GetReportsByType(ctx context.Context, reportType config.ReportK
 		}
 		reports = append(reports, Report{
 			Type:      reportType.Name,
-			Cluster:   "default", // TODO: set actual cluster name if available
+			Cluster:   "",
 			Namespace: item.GetNamespace(),
 			Name:      item.GetName(),
 			Status:    "",
@@ -211,11 +217,12 @@ func (c *Client) GetReportsByType(ctx context.Context, reportType config.ReportK
 	return reports, nil
 }
 
-// GetReportDetails retrieves detailed information about a specific report
 func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportKind, namespace, name string) (*Report, error) {
+	group, version := parseAPIVersion(reportType.APIVersion)
+
 	gvr := schema.GroupVersionResource{
-		Group:    "aquasecurity.github.io",
-		Version:  "v1alpha1",
+		Group:    group,
+		Version:  version,
 		Resource: reportType.Name,
 	}
 
@@ -243,7 +250,7 @@ func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportK
 
 	return &Report{
 		Type:      reportType.Name,
-		Cluster:   "default",
+		Cluster:   "",
 		Namespace: namespace,
 		Name:      name,
 		Status:    status,
@@ -251,13 +258,11 @@ func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportK
 	}, nil
 }
 
-// GetReports returns all reports in the specified namespace
 func (c *Client) GetReports(ctx context.Context, namespace string) ([]Report, error) {
 	var reports []Report
 
-	// Get all report types from config
-	for _, reportType := range config.AllReports {
-		// Get reports of this type without fetching details
+	for _, reportType := range config.AllReports() {
+
 		typeReports, err := c.GetReportsByType(ctx, reportType, namespace)
 		if err != nil {
 			return nil, err
@@ -270,4 +275,23 @@ func (c *Client) GetReports(ctx context.Context, namespace string) ([]Report, er
 
 func (c *Client) Clientset() *kubernetes.Clientset {
 	return c.clientset
+}
+
+func (c *Client) Config() *rest.Config {
+	return c.config
+}
+
+func (c *Client) StartInformer(clusterName string, cacheUpdater CacheUpdater) error {
+	if c.informer != nil {
+		return nil
+	}
+	c.informer = NewReportInformerManager(c, clusterName, cacheUpdater)
+	return c.informer.Start()
+}
+
+func (c *Client) StopInformer() {
+	if c.informer != nil {
+		c.informer.Stop()
+		c.informer = nil
+	}
 }

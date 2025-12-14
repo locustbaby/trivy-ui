@@ -6,29 +6,28 @@ metadata:
   labels:
     {{- include "trivy-ui.labels" . | nindent 4 }}
 rules:
-- apiGroups:
-  - ""
-  resources:
-  - namespaces
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - aquasecurity.github.io
-  resources:
-  - clustercompliancereports
-  - clusterconfigauditreports
-  - clusterinfraassessmentreports
-  - clusterrbacassessmentreports
-  - clustersbomreports
-  - clustervulnerabilityreports
-  - configauditreports
-  - exposedsecretreports
-  - infraassessmentreports
-  - rbacassessmentreports
-  - sbomreports
-  - vulnerabilityreports
-  verbs:
-  - get
-  - list
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - list
+  
+  - apiGroups:
+      - aquasecurity.github.io
+    resources:
+      - "*" 
+    verbs:
+      - get
+      - list
+      - watch  
+  
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
 {{- end }}

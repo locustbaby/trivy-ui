@@ -1,4 +1,3 @@
-// Configuration management
 package config
 
 import (
@@ -7,7 +6,8 @@ import (
 	"strconv"
 )
 
-// Config represents the application configuration
+var config *Config
+
 type Config struct {
 	Host       string
 	Port       int
@@ -15,9 +15,6 @@ type Config struct {
 	StaticPath string
 }
 
-var config *Config
-
-// Get returns the application configuration
 func Get() *Config {
 	if config == nil {
 		config = &Config{
@@ -29,8 +26,6 @@ func Get() *Config {
 	}
 	return config
 }
-
-// Helper functions
 
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
@@ -48,7 +43,6 @@ func getEnvInt(key string, defaultValue int) int {
 	return defaultValue
 }
 
-// KubeConfigPath returns the path to the Kubernetes config file
 func KubeConfigPath() string {
 	if path := os.Getenv("KUBECONFIG"); path != "" {
 		return path

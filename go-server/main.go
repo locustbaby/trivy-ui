@@ -9,28 +9,29 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rs/cors"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"trivy-ui/api"
 	"trivy-ui/config"
-	_ "trivy-ui/docs" // swaggo 文档自动注册
+	_ "trivy-ui/docs"
 	"trivy-ui/kubernetes"
+	"trivy-ui/utils"
 
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 func main() {
-	// Display version information
-	fmt.Printf("Trivy UI Server v%s\n", GetVersion())
-
-	// Load configuration
-	fmt.Println("Configuration loaded")
+	utils.LogInfo("Server starting", map[string]interface{}{"version": GetVersion()})
+	utils.LogInfo("Configuration loaded")
 	cfg := config.Get()
 
-	// 启动时加载本地缓存
-	api.LoadCache()
+	if err := api.LoadCache(); err != nil {
+		utils.LogWarning("Failed to load cache", map[string]interface{}{"error": err.Error()})
+	}
 
 	// 多集群 client map
 	clients := make(map[string]*kubernetes.Client)
@@ -52,37 +53,34 @@ func main() {
 		Kubeconfig string
 	}
 
-	// 1. 批量加载 kubeconfigDir
 	if kubeconfigDir != "" {
 		if stat, err := os.Stat(kubeconfigDir); err == nil && stat.IsDir() {
 			files, err := os.ReadDir(kubeconfigDir)
 			if err != nil {
-				log.Printf("Failed to read kubeconfig dir: %v", err)
+				utils.LogError("Failed to read kubeconfig dir", map[string]interface{}{"error": err.Error()})
 			}
 			for _, file := range files {
 				if file.IsDir() {
 					continue
 				}
-				// 跳过隐藏文件和非 kubeconfig 文件（如 .DS_Store）
 				if strings.HasPrefix(file.Name(), ".") {
 					continue
 				}
 				path := filepath.Join(kubeconfigDir, file.Name())
 				rawConfig, err := clientcmd.LoadFromFile(path)
 				if err != nil {
-					fmt.Printf("Info: Skipping %s: %v\n", file.Name(), err)
+					utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
 					continue
 				}
 				clusterName := ""
 				for name := range rawConfig.Clusters {
 					clusterName = name
-					break // 只取第一个
+					break
 				}
 				if clusterName == "" {
-					fmt.Printf("Info: No cluster found in %s\n", file.Name())
+					utils.LogInfo("No cluster found in kubeconfig file", map[string]interface{}{"file": file.Name()})
 					continue
 				}
-				// 如果 clusterName 包含 / 或 :，取最后一截
 				if strings.Contains(clusterName, "/") {
 					parts := strings.Split(clusterName, "/")
 					clusterName = parts[len(parts)-1]
@@ -92,7 +90,7 @@ func main() {
 				}
 				k8sClient, err := kubernetes.NewClient(path)
 				if err != nil {
-					fmt.Printf("Info: Skipping %s: %v\n", file.Name(), err)
+					utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
 					continue
 				}
 				clustersToInit = append(clustersToInit, struct{ Name, Kubeconfig string }{clusterName, path})
@@ -100,11 +98,9 @@ func main() {
 			}
 		}
 	}
-	// 2. incluster 模式
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		clustersToInit = append(clustersToInit, struct{ Name, Kubeconfig string }{"incluster", ""})
 	}
-	// 3. 单 kubeconfig 文件
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
 		home := os.Getenv("HOME")
@@ -125,40 +121,81 @@ func main() {
 		}
 	}
 
+	registry := config.GetGlobalRegistry()
+	var firstRestConfig *rest.Config
+
 	for _, c := range clustersToInit {
 		k8sClient, err := kubernetes.NewClient(c.Kubeconfig)
 		if err != nil {
-			fmt.Printf("Warning: Failed to create Kubernetes client for %s: %v\n", c.Name, err)
+			utils.LogWarning("Failed to create Kubernetes client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
 			continue
 		}
 		clients[c.Name] = k8sClient
-		// 获取 API Server 地址和 Kubernetes 版本（类似 kubectl cluster-info）
+
 		restConfig, _ := clientcmd.BuildConfigFromFlags("", c.Kubeconfig)
-		apiServerURL := ""
-		if restConfig != nil {
-			apiServerURL = restConfig.Host
-		}
-		version := ""
-		if versionInfo, err := k8sClient.Clientset().Discovery().ServerVersion(); err == nil {
-			version = versionInfo.GitVersion
-		}
-		clusterInfo := api.Cluster{
-			Name:        c.Name,
-			Description: fmt.Sprintf("API Server: %s, version: %s", apiServerURL, version),
-		}
-		api.UpsertClusterToCache(clusterInfo)
-		// 获取所有 ns
-		nsList, err := k8sClient.GetNamespaces(context.Background())
-		if err == nil {
-			for _, ns := range nsList {
-				nsObj := api.Namespace{Cluster: c.Name, Name: ns}
-				api.UpsertNamespaceToCache(nsObj)
+		if firstRestConfig == nil && restConfig != nil {
+			firstRestConfig = restConfig
+			utils.LogInfo("Discovering Trivy Operator CRDs")
+			if err := registry.DiscoverCRDs(restConfig); err != nil {
+				utils.LogWarning("Failed to discover CRDs", map[string]interface{}{
+					"error":   err.Error(),
+					"message": "Will retry in background. Make sure Trivy Operator is installed.",
+				})
+				
+				// 启动后台重试任务
+				go func(cfg *rest.Config) {
+					ticker := time.NewTicker(30 * time.Second)
+					defer ticker.Stop()
+					
+					retryCount := 0
+					for range ticker.C {
+						retryCount++
+						utils.LogDebug("Retrying CRD discovery", map[string]interface{}{"attempt": retryCount})
+						
+						if err := registry.DiscoverCRDs(cfg); err == nil {
+							reports := registry.GetAllReports()
+							utils.LogInfo("Successfully discovered CRDs on retry", map[string]interface{}{
+								"attempt": retryCount,
+								"count":   len(reports),
+							})
+							return
+						}
+						
+						// 最多重试 20 次（10 分钟）
+						if retryCount >= 20 {
+							utils.LogError("Failed to discover CRDs after 20 retries", map[string]interface{}{
+								"message": "Please check if Trivy Operator is installed correctly",
+							})
+							return
+						}
+					}
+				}(restConfig)
+			} else {
+				reports := registry.GetAllReports()
+				utils.LogInfo("Discovered Trivy Operator CRD types", map[string]interface{}{"count": len(reports)})
+				for _, r := range reports {
+					scope := "Namespaced"
+					if !r.Namespaced {
+						scope = "Cluster"
+					}
+					utils.LogDebug("CRD type discovered", map[string]interface{}{"name": r.Name, "kind": r.Kind, "scope": scope})
+				}
 			}
+		}
+
+		if err := api.SetClusterClient(c.Name, k8sClient); err != nil {
+			utils.LogWarning("Failed to set cluster client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
+		}
+
+		cacheUpdater := api.NewCacheUpdater()
+		if err := k8sClient.StartInformer(c.Name, cacheUpdater); err != nil {
+			utils.LogWarning("Failed to start informer", map[string]interface{}{"cluster": c.Name, "error": err.Error(), "message": "Reports will still be available but won't auto-update via watch"})
+		} else {
+			utils.LogInfo("Started informer for cluster", map[string]interface{}{"cluster": c.Name, "message": "Reports will auto-update on changes"})
 		}
 	}
 
-	// 赋值给全局 clients map
-	api.Clients = clients
+	go api.Warmup(context.Background())
 
 	// Check for static files in different locations
 	staticPath := os.Getenv("STATIC_PATH")
@@ -177,18 +214,17 @@ func main() {
 		}
 		if staticPath == "" {
 			staticPath = "trivy-dashboard/dist"
-			fmt.Printf("Warning: Static files not found, using default path: %s\n", staticPath)
+			utils.LogWarning("Static files not found, using default path", map[string]interface{}{"path": staticPath})
 		}
 	}
 	indexPath := filepath.Join(staticPath, "index.html")
 	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
-		fmt.Printf("Warning: index.html not found at %s\n", indexPath)
+		utils.LogWarning("index.html not found", map[string]interface{}{"path": indexPath})
 	} else {
-		fmt.Printf("Found index.html at %s\n", indexPath)
+		utils.LogInfo("Found index.html", map[string]interface{}{"path": indexPath})
 	}
-	fmt.Printf("Using static files from: %s\n", staticPath)
+	utils.LogInfo("Using static files", map[string]interface{}{"path": staticPath})
 
-	// 只用第一个 client 启动 API 路由（如需多集群切换可扩展）
 	var firstClient *kubernetes.Client
 	for _, c := range clustersToInit {
 		if client, ok := clients[c.Name]; ok {
@@ -197,12 +233,12 @@ func main() {
 		}
 	}
 	if firstClient == nil {
+		utils.LogError("No Kubernetes client initialized", nil)
 		log.Fatalf("No Kubernetes client initialized!")
 	}
 	router := api.NewRouter(firstClient, staticPath)
-	fmt.Println("Router created")
+	utils.LogInfo("Router created")
 
-	// Setup CORS
 	corsHandler := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{
@@ -211,26 +247,31 @@ func main() {
 			http.MethodPut,
 			http.MethodDelete,
 			http.MethodOptions,
+			http.MethodHead,
 		},
 		AllowedHeaders: []string{
 			"Accept",
 			"Authorization",
 			"Content-Type",
 			"X-CSRF-Token",
+			"Cache-Control",
 		},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
+		ExposedHeaders:     []string{"Link"},
+		AllowCredentials:   false,
+		MaxAge:             300,
+		OptionsPassthrough: false,
+		Debug:              false,
 	})
-	fmt.Println("CORS handler created")
+	utils.LogInfo("CORS handler created")
 
-	// 注册 swagger 文档路由
 	http.Handle("/swagger/", http.StripPrefix("/swagger/", httpSwagger.WrapHandler))
 
-	// Start server
+	accessLogHandler := api.AccessLogHandler(corsHandler.Handler(router))
+
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	fmt.Printf("Server starting on %s\n", addr)
-	if err := http.ListenAndServe(addr, corsHandler.Handler(router)); err != nil {
+	utils.LogInfo("Server starting", map[string]interface{}{"address": addr})
+	if err := http.ListenAndServe(addr, accessLogHandler); err != nil {
+		utils.LogError("Server failed to start", map[string]interface{}{"error": err.Error()})
 		log.Fatalf("Server failed to start: %v", err)
 	}
 }
