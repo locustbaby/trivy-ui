@@ -37,6 +37,7 @@ export interface Report {
 
 export interface PaginatedResponse<T> {
   total: number
+  withVulnerabilities?: number
   page: number
   pageSize: number
   data: T[]

@@ -134,60 +134,115 @@ func (c *Cache) Delete(key string) {
 
 func (c *Cache) Items() map[string]interface{} {
 	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	now := time.Now().Unix()
-	itemsCopy := make(map[string]CacheItem, len(c.items))
-	reportKeysCopy := make(map[string]bool, len(c.reportKeys))
-	for k, v := range c.items {
-		itemsCopy[k] = v
-	}
-	for k := range c.reportKeys {
-		reportKeysCopy[k] = true
-	}
-	c.mu.RUnlock()
+	result := make(map[string]interface{}, len(c.items))
 
-	result := make(map[string]interface{}, len(itemsCopy)+len(reportKeysCopy))
-
-	for k, item := range itemsCopy {
-		if !strings.HasPrefix(k, "report:") {
-			if item.Expiration > now {
-				result[k] = item.Value
-			}
+	for k, item := range c.items {
+		// For reports, always include them (they are refreshed by informer events)
+		// For other items, check expiration
+		if strings.HasPrefix(k, "report:") {
+			result[k] = item.Value
+		} else if item.Expiration > now {
+			result[k] = item.Value
 		}
-	}
-
-	var expiredReports []string
-	for k := range reportKeysCopy {
-		if item, ok := itemsCopy[k]; ok {
-			if item.Expiration > now {
-				result[k] = item.Value
-			} else {
-				if val, found := c.cache.Get(k); found {
-					result[k] = val
-					expiredReports = append(expiredReports, k)
-				}
-			}
-		} else {
-			if val, found := c.cache.Get(k); found {
-				result[k] = val
-				expiredReports = append(expiredReports, k)
-			}
-		}
-	}
-
-	if len(expiredReports) > 0 {
-		c.mu.Lock()
-		for _, k := range expiredReports {
-			if val, found := c.cache.Get(k); found {
-				c.items[k] = CacheItem{
-					Value:      val,
-					Expiration: time.Now().Add(7 * 24 * time.Hour).Unix(),
-				}
-			}
-		}
-		c.mu.Unlock()
 	}
 
 	return result
+}
+
+// GetReportCount returns the count of reports matching the given type and cluster filters
+func (c *Cache) GetReportCount(reportType, cluster string) (total int, withVulnerabilities int) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for k, item := range c.items {
+		if !strings.HasPrefix(k, "report:") {
+			continue
+		}
+		// Parse key: report:cluster:namespace:type:name
+		parts := strings.SplitN(strings.TrimPrefix(k, "report:"), ":", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		itemCluster := parts[0]
+		itemType := parts[2]
+
+		if reportType != "" && itemType != reportType {
+			continue
+		}
+		if cluster != "" && itemCluster != cluster {
+			continue
+		}
+
+		total++
+
+		// Check if report has vulnerabilities
+		if report, ok := item.Value.(Report); ok {
+			if hasVulnerabilitiesInReport(report) {
+				withVulnerabilities++
+			}
+		}
+	}
+	return
+}
+
+// hasVulnerabilitiesInReport checks if a report has any vulnerabilities
+func hasVulnerabilitiesInReport(report Report) bool {
+	if report.Data == nil {
+		return false
+	}
+
+	data, ok := report.Data.(map[string]interface{})
+	if !ok {
+		return false
+	}
+
+	var summary map[string]interface{}
+
+	if reportObj, ok := data["report"].(map[string]interface{}); ok {
+		if s, ok := reportObj["summary"].(map[string]interface{}); ok {
+			summary = s
+		}
+	}
+
+	if summary == nil {
+		if s, ok := data["summary"].(map[string]interface{}); ok {
+			summary = s
+		}
+	}
+
+	if summary == nil {
+		return false
+	}
+
+	severities := []string{"criticalCount", "highCount", "mediumCount", "lowCount"}
+	for _, key := range severities {
+		if count, ok := summary[key].(float64); ok && count > 0 {
+			return true
+		}
+		if count, ok := summary[key].(int); ok && count > 0 {
+			return true
+		}
+		if count, ok := summary[key].(int64); ok && count > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Cache) GetStats() map[string]interface{} {
+	c.mu.RLock()
+	itemCount := len(c.items)
+	reportCount := len(c.reportKeys)
+	c.mu.RUnlock()
+
+	return map[string]interface{}{
+		"total_items":  itemCount,
+		"report_items": reportCount,
+	}
 }
 
 func (c *Cache) LoadFromFile() error {

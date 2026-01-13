@@ -216,3 +216,9 @@ func (r *CRDRegistry) GetLastRefreshTime() time.Time {
 	defer r.mu.RUnlock()
 	return r.lastRefresh
 }
+
+func (r *CRDRegistry) IsDiscovered() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.reports) > 0 || !r.lastRefresh.IsZero()
+}
