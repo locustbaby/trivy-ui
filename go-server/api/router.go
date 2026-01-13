@@ -71,7 +71,20 @@ func (r *Router) Setup(staticPath string) {
 
 	r.mux.Handle("/swagger/", httpSwagger.WrapHandler)
 
+	// 健康检查端点
+	r.mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	// 就绪检查端点
+	r.mux.HandleFunc("/readyz", r.handler.ReadinessCheck)
+
+	// 缓存统计端点
+	r.mux.HandleFunc("/api/cache/stats", r.handler.GetCacheStats)
+
 	r.mux.HandleFunc("/", SpaHandler(staticPath))
+
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {

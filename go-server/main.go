@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rs/cors"
 	"k8s.io/client-go/rest"
@@ -136,7 +137,39 @@ func main() {
 			firstRestConfig = restConfig
 			utils.LogInfo("Discovering Trivy Operator CRDs")
 			if err := registry.DiscoverCRDs(restConfig); err != nil {
-				utils.LogWarning("Failed to discover CRDs", map[string]interface{}{"error": err.Error(), "message": "Will retry on next request. Make sure Trivy Operator is installed."})
+				utils.LogWarning("Failed to discover CRDs", map[string]interface{}{
+					"error":   err.Error(),
+					"message": "Will retry in background. Make sure Trivy Operator is installed.",
+				})
+				
+				// 启动后台重试任务
+				go func(cfg *rest.Config) {
+					ticker := time.NewTicker(30 * time.Second)
+					defer ticker.Stop()
+					
+					retryCount := 0
+					for range ticker.C {
+						retryCount++
+						utils.LogDebug("Retrying CRD discovery", map[string]interface{}{"attempt": retryCount})
+						
+						if err := registry.DiscoverCRDs(cfg); err == nil {
+							reports := registry.GetAllReports()
+							utils.LogInfo("Successfully discovered CRDs on retry", map[string]interface{}{
+								"attempt": retryCount,
+								"count":   len(reports),
+							})
+							return
+						}
+						
+						// 最多重试 20 次（10 分钟）
+						if retryCount >= 20 {
+							utils.LogError("Failed to discover CRDs after 20 retries", map[string]interface{}{
+								"message": "Please check if Trivy Operator is installed correctly",
+							})
+							return
+						}
+					}
+				}(restConfig)
 			} else {
 				reports := registry.GetAllReports()
 				utils.LogInfo("Discovered Trivy Operator CRD types", map[string]interface{}{"count": len(reports)})

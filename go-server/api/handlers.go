@@ -27,10 +27,11 @@ type Response struct {
 }
 
 type PaginatedResponse struct {
-	Total    int         `json:"total"`
-	Page     int         `json:"page"`
-	PageSize int         `json:"pageSize"`
-	Data     interface{} `json:"data"`
+	Total               int         `json:"total"`
+	WithVulnerabilities int         `json:"withVulnerabilities,omitempty"`
+	Page                int         `json:"page"`
+	PageSize            int         `json:"pageSize"`
+	Data                interface{} `json:"data"`
 }
 
 type Cluster struct {
@@ -83,6 +84,11 @@ func (c *cacheServiceImpl) Delete(key string) {
 	getCache().Delete(key)
 }
 
+func (c *cacheServiceImpl) GetStats() map[string]interface{} {
+	return getCache().GetStats()
+}
+
+
 func NewHandler(k8sClient *kubernetes.Client) *Handler {
 	return &Handler{
 		cache: &cacheServiceImpl{},
@@ -101,6 +107,31 @@ func writeError(w http.ResponseWriter, code int, message string) {
 		Message: message,
 	})
 }
+
+// convertCacheValue 通用类型转换函数，减少重复代码
+func convertCacheValue[T any](v interface{}) (T, bool) {
+	var result T
+	
+	// 直接类型断言
+	if typed, ok := v.(T); ok {
+		return typed, true
+	}
+	
+	// 通过 JSON 转换
+	if mapVal, ok := v.(map[string]interface{}); ok {
+		b, err := json.Marshal(mapVal)
+		if err != nil {
+			return result, false
+		}
+		if err := json.Unmarshal(b, &result); err != nil {
+			return result, false
+		}
+		return result, true
+	}
+	
+	return result, false
+}
+
 
 func SpaHandler(staticPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +192,40 @@ func (h *Handler) GetTypesV1(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ReadinessCheck 检查应用是否就绪
+func (h *Handler) ReadinessCheck(w http.ResponseWriter, r *http.Request) {
+	registry := config.GetGlobalRegistry()
+	
+	// 检查 CRD 是否已发现
+	if !registry.IsDiscovered() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("CRDs not discovered yet"))
+		return
+	}
+	
+	// 检查是否有可用的集群客户端
+	clients := GetAllClusterClients()
+	if len(clients) == 0 {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("No cluster clients available"))
+		return
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ready"))
+}
+
+// GetCacheStats 获取缓存统计信息
+func (h *Handler) GetCacheStats(w http.ResponseWriter, r *http.Request) {
+	stats := h.cache.(*cacheServiceImpl).GetStats()
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    stats,
+	})
+}
+
+
 func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 	refresh := r.URL.Query().Get("refresh") == "1"
 	emptyKey := "empty:clusters"
@@ -170,14 +235,8 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 		items := h.cache.Items()
 		for k, v := range items {
 			if strings.HasPrefix(k, "cluster:") {
-				var cluster Cluster
-				switch val := v.(type) {
-				case Cluster:
-					cluster = val
-				case map[string]interface{}:
-					b, _ := json.Marshal(val)
-					_ = json.Unmarshal(b, &cluster)
-				default:
+				cluster, ok := convertCacheValue[Cluster](v)
+				if !ok {
 					continue
 				}
 				clusters = append(clusters, cluster)
@@ -212,7 +271,7 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 		clusters = append(clusters, clusterInfo)
 	}
 	if len(clusters) == 0 {
-		h.cache.Set(emptyKey, true, 10*time.Second)
+		h.cache.Set(emptyKey, true, 0)
 		writeJSON(w, http.StatusOK, Response{
 			Code:    CodeSuccess,
 			Message: "Success (k8s empty)",
@@ -276,7 +335,7 @@ func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request,
 	}
 	nsList, err := clusterClient.Client.GetNamespaces(r.Context())
 	if err != nil || len(nsList) == 0 {
-		h.cache.Set(emptyKey, true, 10*time.Second)
+		h.cache.Set(emptyKey, true, 0)
 		writeJSON(w, http.StatusOK, Response{
 			Code:    CodeSuccess,
 			Message: "Success (k8s empty)",
@@ -426,6 +485,50 @@ func (h *Handler) getReportsFromCache(typeName, clusterFilter string, namespaceF
 	return reports
 }
 
+func (h *Handler) hasVulnerabilities(report Report) bool {
+	if report.Data == nil {
+		return false
+	}
+	
+	data, ok := report.Data.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	
+	var summary map[string]interface{}
+	
+	if reportObj, ok := data["report"].(map[string]interface{}); ok {
+		if s, ok := reportObj["summary"].(map[string]interface{}); ok {
+			summary = s
+		}
+	}
+	
+	if summary == nil {
+		if s, ok := data["summary"].(map[string]interface{}); ok {
+			summary = s
+		}
+	}
+	
+	if summary == nil {
+		return false
+	}
+	
+	severities := []string{"criticalCount", "highCount", "mediumCount", "lowCount"}
+	for _, key := range severities {
+		if count, ok := summary[key].(float64); ok && count > 0 {
+			return true
+		}
+		if count, ok := summary[key].(int); ok && count > 0 {
+			return true
+		}
+		if count, ok := summary[key].(int64); ok && count > 0 {
+			return true
+		}
+	}
+	
+	return false
+}
+
 func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typeName string) {
 	reportKind := config.GetReportByName(typeName)
 	if reportKind == nil {
@@ -434,11 +537,17 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 	}
 
 	clusterFilter, namespaceFilters, page, pageSize := h.parseQueryParams(r)
-	// For cluster-scoped reports, ignore namespace filters
 	if reportKind != nil && !reportKind.Namespaced {
 		namespaceFilters = []string{}
 	}
 	allReports := h.getReportsFromCache(typeName, clusterFilter, namespaceFilters)
+
+	withVulnerabilities := 0
+	for _, report := range allReports {
+		if h.hasVulnerabilities(report) {
+			withVulnerabilities++
+		}
+	}
 
 	total := len(allReports)
 	start := (page - 1) * pageSize
@@ -462,23 +571,25 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 	}
 
 	utils.LogInfo("GetReportsByTypeV1", map[string]interface{}{
-		"typeName":         typeName,
-		"clusterFilter":    clusterFilter,
-		"namespaceFilters": namespaceFilters,
-		"total":            total,
-		"page":             page,
-		"pageSize":         pageSize,
-		"returned":         len(paginatedReports),
+		"typeName":            typeName,
+		"clusterFilter":       clusterFilter,
+		"namespaceFilters":    namespaceFilters,
+		"total":               total,
+		"withVulnerabilities": withVulnerabilities,
+		"page":                page,
+		"pageSize":            pageSize,
+		"returned":            len(paginatedReports),
 	})
 
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
 		Message: "Success",
 		Data: PaginatedResponse{
-			Total:    total,
-			Page:     page,
-			PageSize: pageSize,
-			Data:     paginatedReports,
+			Total:               total,
+			WithVulnerabilities: withVulnerabilities,
+			Page:                page,
+			PageSize:            pageSize,
+			Data:                paginatedReports,
 		},
 	})
 }
@@ -619,18 +730,18 @@ func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typ
 
 func UpsertClusterToCache(cluster Cluster) {
 	if cache != nil {
-		cache.Set(clusterKey(cluster.Name), cluster, 10*time.Second)
+		cache.Set(clusterKey(cluster.Name), cluster, 0)
 	}
 }
 
 func UpsertNamespaceToCache(ns Namespace) {
 	if cache != nil {
-		cache.Set(namespaceKey(ns.Cluster, ns.Name), ns, 10*time.Second)
+		cache.Set(namespaceKey(ns.Cluster, ns.Name), ns, 0)
 	}
 }
 
 func UpsertReportToCache(rep Report) {
 	if cache != nil {
-		cache.Set(reportKey(rep.Cluster, rep.Namespace, rep.Type, rep.Name), rep, 7*24*time.Hour)
+		cache.Set(reportKey(rep.Cluster, rep.Namespace, rep.Type, rep.Name), rep, 0)
 	}
 }
