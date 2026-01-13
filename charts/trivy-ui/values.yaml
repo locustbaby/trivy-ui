@@ -83,6 +83,8 @@ env:
   KUBECONFIG_DIR: "/kubeconfigs"
   # STATIC_PATH: Path to static frontend assets
   STATIC_PATH: "trivy-dashboard/dist"
+  # DATA_PATH: Directory for cache and data files (should match cache.mountPath if cache.enabled)
+  DATA_PATH: "/cache"
   # DEBUG: Enable debug logging
   DEBUG: "false"
 
@@ -97,6 +99,15 @@ kubeconfigs:
   data: {}
     # cluster1: <base64-encoded-kubeconfig1>
     # cluster2: <base64-encoded-kubeconfig2>
+
+# Cache storage configuration
+cache:
+  # Enable cache storage using emptyDir
+  enabled: true
+  # Mount path for cache directory
+  mountPath: "/cache"
+  # Size limit for emptyDir (e.g., "1Gi", "500Mi")
+  sizeLimit: "1Gi"
 
 # RBAC configuration
 rbac:

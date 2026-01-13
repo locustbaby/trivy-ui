@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom"
 import { api, type Report, type ReportType } from "../api/client"
 import { Button } from "./ui/button"
 import { MultiCombobox } from "./ui/multi-combobox"
-import { Search, Loader2, ArrowUp, Share2, Check, Shield, AlertTriangle } from "lucide-react"
+import { Search, Loader2, ArrowUp, Share2, Check, Shield, AlertTriangle, X } from "lucide-react"
 
 interface ReportsListProps {
   typeName: string
@@ -22,32 +22,41 @@ export function ReportsList({
 }: ReportsListProps) {
   const [searchParams, setSearchParams] = useSearchParams()
 
-  // Get filter state from URL
+  // Get filter state from URL - these are the source of truth
   const urlNamespaces = searchParams.get("namespace")
   const urlSearch = searchParams.get("search") || ""
   const urlShowAll = searchParams.get("showAll") !== "false" // default true
 
-  const [reports, setReports] = useState<Report[]>([])
-  const [namespaces, setNamespaces] = useState<string[]>([])
-  const [selectedNamespaces, setSelectedNamespaces] = useState<string[]>(() => {
+  // Parse URL namespaces once
+  const initialNamespaces = useMemo(() => {
     if (urlNamespaces) {
       return urlNamespaces.split(",").filter(Boolean)
     }
     return []
-  })
+  }, [urlNamespaces])
+
+  const [reports, setReports] = useState<Report[]>([])
+  const [namespaces, setNamespaces] = useState<string[]>([])
+  const [selectedNamespaces, setSelectedNamespaces] = useState<string[]>(initialNamespaces)
   const [searchQuery, setSearchQuery] = useState<string>(urlSearch)
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string>()
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const [withVulnerabilities, setWithVulnerabilities] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [showScrollTop, setShowScrollTop] = useState(false)
   const [showAllReports, setShowAllReports] = useState(urlShowAll)
   const [copiedReportId, setCopiedReportId] = useState<string | null>(null)
+  const [copiedField, setCopiedField] = useState<string | null>(null)
+  const [namespacesLoaded, setNamespacesLoaded] = useState(false)
   const observerTarget = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const isFirstLoad = useRef(true)
+  const fetchInProgressRef = useRef<string | null>(null) // Track current fetch to prevent duplicates
+
+  const reportType = reportTypes.find((t) => t.name === typeName)
+  const isNamespaced = reportType?.namespaced ?? false
 
   // Update URL params helper
   const updateUrlParams = useCallback((updates: Record<string, string | null>) => {
@@ -64,17 +73,31 @@ export function ReportsList({
     }, { replace: true })
   }, [setSearchParams])
 
-  // Sync namespace selection to URL
+  // Sync namespace selection to URL and localStorage
   const handleNamespaceChange = useCallback((namespaces: string[]) => {
     setSelectedNamespaces(namespaces)
     const hasAll = namespaces.includes("all")
     updateUrlParams({
       namespace: hasAll || namespaces.length === 0 ? null : namespaces.join(",")
     })
-  }, [updateUrlParams])
+    // Save to localStorage
+    if (typeName && selectedCluster && isNamespaced) {
+      localStorage.setItem(`trivy-ui-selected-namespaces-${typeName}-${selectedCluster}`, JSON.stringify(namespaces))
+    }
+  }, [updateUrlParams, typeName, selectedCluster, isNamespaced])
 
   // Sync search to URL with debounce
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current)
+      }
+    }
+  }, [])
+
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value)
 
@@ -108,11 +131,29 @@ export function ReportsList({
     url.searchParams.delete("search")
     url.searchParams.delete("showAll")
 
-    navigator.clipboard.writeText(url.toString()).then(() => {
-      const reportId = `${report.cluster}-${report.namespace}-${report.name}`
-      setCopiedReportId(reportId)
-      setTimeout(() => setCopiedReportId(null), 2000)
-    })
+    navigator.clipboard
+      .writeText(url.toString())
+      .then(() => {
+        const reportId = `${report.cluster}-${report.namespace}-${report.name}`
+        setCopiedReportId(reportId)
+        setTimeout(() => setCopiedReportId(null), 2000)
+      })
+      .catch((err) => {
+        console.error("Failed to copy link:", err)
+      })
+  }, [])
+
+  const copyToClipboard = useCallback((text: string, fieldId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopiedField(fieldId)
+        setTimeout(() => setCopiedField(null), 1500)
+      })
+      .catch((err) => {
+        console.error("Failed to copy:", err)
+      })
   }, [])
 
   const scrollToTop = useCallback(() => {
@@ -142,27 +183,43 @@ export function ReportsList({
     }
   }, [])
 
-  const reportType = reportTypes.find((t) => t.name === typeName)
-  const isNamespaced = reportType?.namespaced ?? false
+  // Fetch reports - this now uses URL namespace directly for initial load
+  const fetchReports = useCallback(async (pageNum: number, reset: boolean = false, overrideNamespaces?: string[]) => {
+    // Use override namespaces if provided, otherwise use selected namespaces
+    const namespacesToUse = overrideNamespaces ?? selectedNamespaces
+    const namespaceParams = isNamespaced && namespacesToUse.length > 0 && !namespacesToUse.includes("all")
+      ? namespacesToUse.join(",")
+      : undefined
 
-  const fetchReports = useCallback(async (pageNum: number, reset: boolean = false) => {
+    // Create a unique key for this request to prevent duplicates
+    const requestKey = `${typeName}-${selectedCluster}-${namespaceParams}-${pageNum}-${reset}`
+
+    // Skip if the same request is already in progress
+    if (fetchInProgressRef.current === requestKey) {
+      return
+    }
+
     try {
+      fetchInProgressRef.current = requestKey
+
       if (reset) {
         setLoading(true)
       } else {
         setLoadingMore(true)
       }
       setError(undefined)
-      const namespaceParams = isNamespaced && selectedNamespaces.length > 0 && !selectedNamespaces.includes("all")
-        ? selectedNamespaces.join(",")
-        : undefined
+
       const response = await api.getReportsByType(typeName, pageNum, PAGE_SIZE, selectedCluster || undefined, namespaceParams)
       setTotal(response.total)
-      setWithVulnerabilities(response.withVulnerabilities ?? 0)
       if (reset) {
         setReports(response.data)
       } else {
-        setReports((prev) => [...prev, ...response.data])
+        // Deduplicate when loading more
+        setReports((prev) => {
+          const existingKeys = new Set(prev.map(r => `${r.cluster}-${r.namespace}-${r.name}`))
+          const newReports = response.data.filter(r => !existingKeys.has(`${r.cluster}-${r.namespace}-${r.name}`))
+          return [...prev, ...newReports]
+        })
       }
       setHasMore(response.data.length === PAGE_SIZE && (pageNum * PAGE_SIZE) < response.total)
     } catch (err) {
@@ -170,76 +227,95 @@ export function ReportsList({
     } finally {
       setLoading(false)
       setLoadingMore(false)
+      fetchInProgressRef.current = null
     }
   }, [typeName, selectedCluster, selectedNamespaces, isNamespaced])
 
-  // Reset when type or cluster changes
-  useEffect(() => {
-    if (typeName) {
-      initializedRef.current = false
-      setPage(1)
-      setReports([])
-      setTotal(0)
-      setHasMore(false)
-      // Reset filters when type changes
-      setSelectedNamespaces([])
-      setSearchQuery("")
-      if (isNamespaced && selectedCluster) {
-        fetchNamespaces()
-      }
-    }
-  }, [typeName, selectedCluster, isNamespaced])
-
-  const prevParamsRef = useRef<string>("")
-
-  useEffect(() => {
-    if (!typeName) return
-
-    const currentParams = JSON.stringify({
-      typeName,
-      cluster: selectedCluster || "",
-      namespaces: [...selectedNamespaces].sort(),
-      namespacesLength: namespaces.length,
-    })
-
-    if (currentParams !== prevParamsRef.current) {
-      if (!isNamespaced || namespaces.length > 0 || selectedNamespaces.length === 0) {
-        fetchReports(1, true)
-      }
-      prevParamsRef.current = currentParams
-    }
-  }, [typeName, selectedCluster, selectedNamespaces, fetchReports, isNamespaced, namespaces.length])
-
-  const initializedRef = useRef(false)
-
-  // Initialize namespace selection from URL
-  useEffect(() => {
-    if (namespaces.length === 0) return
-    if (initializedRef.current) return
-
-    const urlNs = searchParams.get("namespace")
-    if (urlNs) {
-      const nsArray = urlNs.split(",").filter(Boolean)
-      const valid = nsArray.filter((ns) => ns === "all" || namespaces.includes(ns))
-      if (valid.length > 0) {
-        setSelectedNamespaces(valid)
-        initializedRef.current = true
-        return
-      }
-    }
-    initializedRef.current = true
-  }, [namespaces, searchParams])
-
-  const fetchNamespaces = async () => {
-    if (!selectedCluster) return
+  // Fetch namespaces for the cluster
+  const fetchNamespaces = useCallback(async (): Promise<string[]> => {
+    if (!selectedCluster) return []
     try {
       const data = await api.getNamespacesByCluster(selectedCluster)
       const nsList = data.map((ns) => ns.name).sort()
       setNamespaces(nsList)
+      setNamespacesLoaded(true)
+      return nsList
     } catch (err) {
       console.error("Failed to fetch namespaces:", err)
+      setNamespacesLoaded(true)
+      return []
     }
-  }
+  }, [selectedCluster])
+
+  // Reset and initialize when type or cluster changes
+  // Note: Only depend on typeName, selectedCluster, isNamespaced - NOT on callback functions
+  // This prevents re-fetching when unrelated URL params change (like closing report details)
+  useEffect(() => {
+    if (!typeName) return
+
+    isFirstLoad.current = true
+    setPage(1)
+    setReports([])
+    setTotal(0)
+    setHasMore(false)
+    setNamespacesLoaded(false)
+
+    if (isNamespaced && selectedCluster) {
+      fetchNamespaces().then((availableNamespaces) => {
+        const urlNs = searchParams.get("namespace")
+        const urlNsArray = urlNs ? urlNs.split(",").filter(Boolean) : []
+
+        // Validate URL namespaces against available namespaces
+        const validUrlNs = urlNsArray.filter((ns) => ns === "all" || availableNamespaces.includes(ns))
+
+        let namespacesToUse: string[] = []
+        if (validUrlNs.length > 0) {
+          // Use URL namespace if valid
+          namespacesToUse = validUrlNs
+        } else {
+          // Otherwise, load from localStorage for current type
+          const savedNs = localStorage.getItem(`trivy-ui-selected-namespaces-${typeName}-${selectedCluster}`)
+          if (savedNs) {
+            try {
+              const parsed = JSON.parse(savedNs)
+              if (Array.isArray(parsed)) {
+                namespacesToUse = parsed.filter((ns) => ns === "all" || availableNamespaces.includes(ns))
+              }
+            } catch (e) {
+              // ignore parse error
+            }
+          }
+        }
+        // Always set selectedNamespaces and update URL, even if empty
+        setSelectedNamespaces(namespacesToUse)
+        updateUrlParams({ namespace: namespacesToUse.length > 0 && !namespacesToUse.includes("all") ? namespacesToUse.join(",") : null })
+        fetchReports(1, true, namespacesToUse)
+        isFirstLoad.current = false
+      })
+    } else {
+      // For non-namespaced types, clear namespace selection and URL
+      setSelectedNamespaces([])
+      updateUrlParams({ namespace: null })
+      fetchReports(1, true, [])
+      isFirstLoad.current = false
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typeName, selectedCluster, isNamespaced])
+
+  // Handle subsequent namespace changes (after initial load)
+  const prevNamespacesRef = useRef<string>("")
+  useEffect(() => {
+    if (isFirstLoad.current) return
+    if (!namespacesLoaded && isNamespaced) return
+
+    const currentNs = JSON.stringify([...selectedNamespaces].sort())
+    if (currentNs !== prevNamespacesRef.current) {
+      prevNamespacesRef.current = currentNs
+      setPage(1)
+      setHasMore(false) // Reset hasMore when namespace changes
+      fetchReports(1, true)
+    }
+  }, [selectedNamespaces, namespacesLoaded, isNamespaced, fetchReports])
 
   const loadMore = useCallback(() => {
     if (!loadingMore && hasMore) {
@@ -250,6 +326,8 @@ export function ReportsList({
   }, [page, loadingMore, hasMore, fetchReports])
 
   useEffect(() => {
+    if (!hasMore) return // Don't set up observer if there's no more data
+
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting && hasMore && !loadingMore) {
@@ -318,6 +396,20 @@ export function ReportsList({
       })
     }
 
+    // Sort for stable results: cluster -> namespace -> name
+    filtered = [...filtered].sort((a, b) => {
+      // 1. Sort by cluster
+      const clusterCompare = a.cluster.localeCompare(b.cluster)
+      if (clusterCompare !== 0) return clusterCompare
+      // 2. Sort by namespace (empty namespace goes last)
+      const nsA = a.namespace || "\uffff" // Use high unicode char to sort empty last
+      const nsB = b.namespace || "\uffff"
+      const nsCompare = nsA.localeCompare(nsB)
+      if (nsCompare !== 0) return nsCompare
+      // 3. Sort by name
+      return a.name.localeCompare(b.name)
+    })
+
     return filtered
   }, [reports, searchQuery, showAllReports])
 
@@ -357,13 +449,15 @@ export function ReportsList({
             {showAllReports ? (
               <>
                 Showing <span className="font-semibold text-foreground">{filteredReports.length}</span>
-                {total > 0 && <span> of {total} total reports</span>}
+                {hasMore && <span> (loaded {reports.length})</span>}
+                {total > 0 && <span> of {total} total</span>}
               </>
             ) : (
               <>
                 Showing <span className="font-semibold text-foreground">{filteredReports.length}</span>
-                {withVulnerabilities > 0 && <span> of {withVulnerabilities} with issues</span>}
-                {total > 0 && <span className="text-muted-foreground/70"> ({total} total)</span>}
+                <span> with issues</span>
+                {hasMore && <span> (loaded {reports.length})</span>}
+                {total > 0 && <span className="text-muted-foreground/70"> / {total} total</span>}
               </>
             )}
           </p>
@@ -377,48 +471,69 @@ export function ReportsList({
       </div>
 
       {/* Filters */}
-      <div className="flex gap-4 items-end flex-wrap">
-        {isNamespaced && namespaces.length > 0 && (
-          <div className="w-64">
+      <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-end">
+        {isNamespaced && (
+          <div className="w-full sm:w-64">
             <label className="mb-2 block text-sm font-medium text-muted-foreground">Namespace</label>
-            <MultiCombobox
-              options={namespaceOptions}
-              value={selectedNamespaces}
-              onValueChange={handleNamespaceChange}
-              placeholder="Select namespaces..."
-            />
+            {!namespacesLoaded ? (
+              <div className="h-11 rounded-xl border bg-muted animate-pulse flex items-center justify-center">
+                <span className="text-sm text-muted-foreground">Loading namespaces...</span>
+              </div>
+            ) : namespaces.length > 0 ? (
+              <MultiCombobox
+                options={namespaceOptions}
+                value={selectedNamespaces}
+                onValueChange={handleNamespaceChange}
+                placeholder="Select namespaces..."
+              />
+            ) : (
+              <div className="h-11 rounded-xl border bg-muted flex items-center justify-center">
+                <span className="text-sm text-muted-foreground">No namespaces available</span>
+              </div>
+            )}
           </div>
         )}
-        <div className="flex-1 min-w-[200px]">
+        <div className="flex-1 min-w-0 sm:min-w-[200px]">
           <label className="mb-2 block text-sm font-medium text-muted-foreground">Search</label>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <input
               type="text"
-              className="w-full pl-10 pr-4 py-2.5 rounded-xl border bg-background text-sm outline-none focus:ring-2 focus:ring-primary/50 transition-shadow"
+              className="w-full pl-10 pr-10 py-2.5 rounded-xl border bg-background text-sm outline-none focus:ring-2 focus:ring-primary/50 transition-shadow"
               placeholder="Search by name, cluster, namespace..."
               value={searchQuery}
               onChange={(e) => handleSearchChange(e.target.value)}
             />
+            {searchQuery && (
+              <button
+                onClick={() => handleSearchChange("")}
+                className="absolute right-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground hover:text-foreground transition-colors"
+                title="Clear search"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
-        <div className="flex items-end">
+        <div className="flex items-stretch sm:items-end gap-2">
           <Button
             onClick={() => handleShowAllChange(!showAllReports)}
             variant={showAllReports ? "outline" : "default"}
             size="sm"
-            className="h-11 px-4 gap-2"
-            title={showAllReports ? "Click to show only reports with vulnerabilities" : "Click to include reports without vulnerabilities"}
+            className="h-11 px-4 gap-2 flex-1 sm:flex-initial"
+            title={showAllReports ? "Show only vulnerable" : "Show all reports"}
           >
             {showAllReports ? (
               <>
                 <Shield className="h-4 w-4" />
-                Include Clean
+                <span className="hidden sm:inline">All</span>
+                <span className="sm:hidden">All</span>
               </>
             ) : (
               <>
                 <AlertTriangle className="h-4 w-4" />
-                Only Vulnerabilities
+                <span className="hidden sm:inline">Vulnerable</span>
+                <span className="sm:hidden">Vuln</span>
               </>
             )}
           </Button>
@@ -484,19 +599,35 @@ export function ReportsList({
                         )}
                       </div>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                        <span className="inline-flex items-center gap-1">
-                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                          </svg>
-                          {report.cluster}
-                        </span>
-                        {report.namespace && (
-                          <span className="inline-flex items-center gap-1">
+                        <button
+                          onClick={(e) => copyToClipboard(report.cluster, `cluster-${reportId}`, e)}
+                          className="inline-flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer"
+                          title="Click to copy cluster name"
+                        >
+                          {copiedField === `cluster-${reportId}` ? (
+                            <Check className="h-3.5 w-3.5 text-green-500" />
+                          ) : (
                             <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                             </svg>
-                            {report.namespace}
-                          </span>
+                          )}
+                          <span className={copiedField === `cluster-${reportId}` ? "text-green-500" : ""}>{report.cluster}</span>
+                        </button>
+                        {report.namespace && (
+                          <button
+                            onClick={(e) => copyToClipboard(report.namespace!, `ns-${reportId}`, e)}
+                            className="inline-flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer"
+                            title="Click to copy namespace"
+                          >
+                            {copiedField === `ns-${reportId}` ? (
+                              <Check className="h-3.5 w-3.5 text-green-500" />
+                            ) : (
+                              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                              </svg>
+                            )}
+                            <span className={copiedField === `ns-${reportId}` ? "text-green-500" : ""}>{report.namespace}</span>
+                          </button>
                         )}
                         {report.updated_at && (
                           <span className="inline-flex items-center gap-1">

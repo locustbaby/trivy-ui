@@ -57,16 +57,23 @@ export function Dashboard() {
   }, [updateUrlParams])
 
   // Load report from URL on initial load
-  const loadReportFromUrl = useCallback(async (typeName: string, reportName: string) => {
-    try {
-      const report = await api.getReportDetails(typeName, reportName)
-      setSelectedReport(report)
-    } catch (err) {
-      console.error("Failed to load report from URL:", err)
-      // Clear report param if load fails
-      updateUrlParams({ report: null, namespace: null })
+  // We only set a minimal report object here - ReportDetails component will load the full data
+  const loadReportFromUrl = useCallback((typeName: string, reportName: string) => {
+    // Create a minimal report object just to trigger ReportDetails to open
+    // ReportDetails component will fetch the full data itself
+    const urlCluster = searchParams.get("cluster")
+    // Note: We don't use namespace from URL here for the report object
+    // The namespace in URL is for list filtering, not for identifying the report
+    // ReportDetails will find the correct namespace when fetching the full report
+    const minimalReport: Report = {
+      type: typeName,
+      cluster: urlCluster || "",
+      namespace: "", // Let ReportDetails resolve the actual namespace
+      name: reportName,
+      data: {},
     }
-  }, [updateUrlParams])
+    setSelectedReport(minimalReport)
+  }, [searchParams])
 
   // Initialize from URL params after data loads
   const initFromUrlParams = useCallback((clustersData: Cluster[], typesData: ReportType[]) => {
@@ -118,11 +125,7 @@ export function Dashboard() {
       setClusters(clustersData)
       setReportTypes(typesData)
 
-      const { cluster } = initFromUrlParams(clustersData, typesData)
-
-      if (cluster) {
-        fetchReportCounts(typesData, cluster)
-      }
+      initFromUrlParams(clustersData, typesData)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error")
     } finally {
@@ -132,11 +135,13 @@ export function Dashboard() {
 
   const handleSelectReport = (report: Report) => {
     setSelectedReport(report)
+    // Only update report-related params, DO NOT modify namespace
+    // Namespace is managed by ReportsList for filtering, not by report selection
     updateUrlParams({
       cluster: report.cluster,
       type: report.type,
       report: report.name,
-      namespace: report.namespace || null
+      // Note: Do NOT set namespace here - it would overwrite the user's namespace filter selection
     })
   }
 
@@ -146,29 +151,71 @@ export function Dashboard() {
     // Keep namespace in URL if it was part of filtering
   }
 
-  const fetchReportCounts = async (types: ReportType[], cluster?: string) => {
-    if (!cluster) return
-
-    const counts: Record<string, number> = {}
-    await Promise.all(
-      types.map(async (type) => {
-        try {
-          const response = await api.getReportsByType(type.name, 1, 1, cluster, undefined)
-          counts[type.name] = response.total
-        } catch (err) {
-          counts[type.name] = 0
+  // Get cached counts for a cluster (without setting state)
+  const getCachedCounts = useCallback((cluster: string): Record<string, number> => {
+    const cacheKey = `trivy-ui-report-counts-${cluster}`
+    const cached = localStorage.getItem(cacheKey)
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached)
+        if (typeof parsed === "object" && parsed !== null) {
+          return parsed
         }
-      })
-    )
-    setReportCounts(counts)
-  }
-
-  // Refetch counts when cluster changes
-  useEffect(() => {
-    if (selectedCluster && reportTypes.length > 0) {
-      fetchReportCounts(reportTypes, selectedCluster)
+      } catch (e) {
+        // ignore parse error
+      }
     }
-  }, [selectedCluster, reportTypes])
+    return {}
+  }, [])
+
+  // Save counts to cache
+  const saveCountsToCache = useCallback((cluster: string, counts: Record<string, number>) => {
+    const cacheKey = `trivy-ui-report-counts-${cluster}`
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(counts))
+    } catch (e) {
+      // ignore storage error
+    }
+  }, [])
+
+  // Fetch count only for the currently selected type (lazy loading)
+  const fetchCurrentTypeCount = useCallback(async (typeName: string, cluster: string) => {
+    try {
+      const response = await api.getReportsByType(typeName, 1, 1, cluster, undefined)
+      setReportCounts(prev => {
+        const updated = { ...prev, [typeName]: response.total }
+        saveCountsToCache(cluster, updated)
+        return updated
+      })
+    } catch (err) {
+      setReportCounts(prev => {
+        const updated = { ...prev, [typeName]: 0 }
+        saveCountsToCache(cluster, updated)
+        return updated
+      })
+    }
+  }, [saveCountsToCache])
+
+  // Load cached counts when cluster changes
+  useEffect(() => {
+    if (selectedCluster) {
+      const cached = getCachedCounts(selectedCluster)
+      if (Object.keys(cached).length > 0) {
+        setReportCounts(cached)
+      }
+      // If current type doesn't have cached count, fetch it
+      if (selectedType && cached[selectedType] === undefined) {
+        fetchCurrentTypeCount(selectedType, selectedCluster)
+      }
+    }
+  }, [selectedCluster, getCachedCounts, fetchCurrentTypeCount, selectedType])
+
+  // Only fetch count for current type when type changes (lazy load)
+  useEffect(() => {
+    if (selectedCluster && selectedType && reportCounts[selectedType] === undefined) {
+      fetchCurrentTypeCount(selectedType, selectedCluster)
+    }
+  }, [selectedCluster, selectedType, fetchCurrentTypeCount, reportCounts])
 
   // Get current URL for sharing
   const getShareUrl = () => {

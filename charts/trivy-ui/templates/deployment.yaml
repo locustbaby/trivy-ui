@@ -52,17 +52,26 @@ spec:
               port: http
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.kubeconfigs.create }}
           volumeMounts:
+            {{- if .Values.kubeconfigs.create }}
             - name: kubeconfigs
               mountPath: /kubeconfigs
-          {{- end }}
-      {{- if .Values.kubeconfigs.create }}
+            {{- end }}
+            {{- if .Values.cache.enabled }}
+            - name: cache
+              mountPath: {{ .Values.cache.mountPath | default "/cache" }}
+            {{- end }}
       volumes:
+        {{- if .Values.kubeconfigs.create }}
         - name: kubeconfigs
           secret:
             secretName: {{ .Values.kubeconfigs.secretName }}
-      {{- end }}
+        {{- end }}
+        {{- if .Values.cache.enabled }}
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .Values.cache.sizeLimit | default "1Gi" }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -28,7 +28,32 @@ type Client struct {
 	informer  *ReportInformerManager
 }
 
+// ClientConfig holds configuration for K8s client
+type ClientConfig struct {
+	// QPS is the maximum queries per second to the API server
+	QPS float32
+	// Burst is the maximum burst for throttle
+	Burst int
+	// Timeout is the request timeout
+	Timeout time.Duration
+}
+
+// DefaultClientConfig returns sensible defaults for multi-cluster deployments
+func DefaultClientConfig() ClientConfig {
+	return ClientConfig{
+		QPS:     20, // 20 QPS per cluster (conservative for 20 clusters)
+		Burst:   30, // Allow short bursts
+		Timeout: 0,  // No global timeout - let individual requests set their own context timeouts
+		// Note: Don't set a global timeout as it breaks Watch (long-running connections)
+		// Use context.WithTimeout for individual requests instead
+	}
+}
+
 func NewClient(kubeconfig string) (*Client, error) {
+	return NewClientWithConfig(kubeconfig, DefaultClientConfig())
+}
+
+func NewClientWithConfig(kubeconfig string, clientConfig ClientConfig) (*Client, error) {
 	var config *rest.Config
 	var err error
 	var clusterName string
@@ -59,6 +84,15 @@ func NewClient(kubeconfig string) (*Client, error) {
 
 	if err != nil {
 		return nil, err
+	}
+
+	// Apply rate limiting settings
+	// Note: We don't set config.Timeout globally as it breaks Watch (long-running connections)
+	// Individual requests should use context.WithTimeout instead
+	config.QPS = clientConfig.QPS
+	config.Burst = clientConfig.Burst
+	if clientConfig.Timeout > 0 {
+		config.Timeout = clientConfig.Timeout
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
@@ -103,6 +137,7 @@ func parseAPIVersion(apiVersion string) (group, version string) {
 	return group, version
 }
 
+// ListReports lists all reports with pagination to handle large datasets (like SBOM)
 func (c *Client) ListReports(ctx context.Context, reportType config.ReportKind, namespace string) ([]unstructured.Unstructured, error) {
 
 	if namespace != "" && !reportType.Namespaced {
@@ -117,22 +152,44 @@ func (c *Client) ListReports(ctx context.Context, reportType config.ReportKind, 
 		Resource: reportType.Name,
 	}
 
-	var list *unstructured.UnstructuredList
-	var err error
-	if reportType.Namespaced {
-		list, err = c.dynamic.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
-	} else {
-		list, err = c.dynamic.Resource(gvr).List(ctx, metav1.ListOptions{})
-	}
-	if err != nil {
+	var allItems []unstructured.Unstructured
+	continueToken := ""
 
-		if errors.IsNotFound(err) {
-			return nil, nil
+	// Use pagination to avoid timeout on large datasets
+	// Limit of 100 items per page is reasonable for most report types
+	const pageLimit = int64(100)
+
+	for {
+		listOptions := metav1.ListOptions{
+			Limit:    pageLimit,
+			Continue: continueToken,
 		}
-		return nil, fmt.Errorf("failed to list %s: %w", reportType.Kind, err)
+
+		var list *unstructured.UnstructuredList
+		var err error
+		if reportType.Namespaced {
+			list, err = c.dynamic.Resource(gvr).Namespace(namespace).List(ctx, listOptions)
+		} else {
+			list, err = c.dynamic.Resource(gvr).List(ctx, listOptions)
+		}
+
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to list %s: %w", reportType.Kind, err)
+		}
+
+		allItems = append(allItems, list.Items...)
+
+		// Check if there are more pages
+		if list.GetContinue() == "" {
+			break
+		}
+		continueToken = list.GetContinue()
 	}
 
-	return list.Items, nil
+	return allItems, nil
 }
 
 type Report struct {
@@ -294,4 +351,8 @@ func (c *Client) StopInformer() {
 		c.informer.Stop()
 		c.informer = nil
 	}
+}
+
+func (c *Client) GetInformer() *ReportInformerManager {
+	return c.informer
 }

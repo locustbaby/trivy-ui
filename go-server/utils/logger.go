@@ -77,17 +77,14 @@ func LogDebug(message string, fields ...map[string]interface{}) {
 	logJSON(LevelDebug, message, mergedFields)
 }
 
-func LogAccess(clientIP, method, path, proto string, statusCode, size int, referer, userAgent string, duration time.Duration) {
+func LogAccess(clientIP, method, path string, statusCode, size int, duration time.Duration) {
 	fields := map[string]interface{}{
-		"client_ip":   clientIP,
-		"method":      method,
-		"path":        path,
-		"proto":       proto,
-		"status_code": statusCode,
-		"size":        size,
-		"referer":     referer,
-		"user_agent":  userAgent,
-		"duration_ms": duration.Milliseconds(),
+		"ip":     clientIP,
+		"method": method,
+		"path":   path,
+		"status": statusCode,
+		"size":   size,
+		"ms":     duration.Milliseconds(),
 	}
-	logJSON(LevelInfo, "access", fields)
+	logJSON(LevelInfo, "request", fields)
 }

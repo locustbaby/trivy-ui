@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -333,8 +335,36 @@ func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, "Cluster not found")
 		return
 	}
-	nsList, err := clusterClient.Client.GetNamespaces(r.Context())
-	if err != nil || len(nsList) == 0 {
+	
+	// Use a shorter timeout for namespace listing (5 seconds)
+	// This prevents long waits if K8s client is not ready yet
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	
+	nsList, err := clusterClient.Client.GetNamespaces(ctx)
+	if err != nil {
+		// Check if context was canceled or timed out
+		if ctx.Err() == context.DeadlineExceeded {
+			utils.LogWarning("Timeout fetching namespaces from Kubernetes", map[string]interface{}{
+				"cluster": cluster,
+				"error":   "timeout after 5 seconds",
+			})
+		} else {
+			utils.LogWarning("Failed to fetch namespaces from Kubernetes", map[string]interface{}{
+				"cluster": cluster,
+				"error":   err.Error(),
+			})
+		}
+		// Return empty list instead of error, so UI can still function
+		writeJSON(w, http.StatusOK, Response{
+			Code:    CodeSuccess,
+			Message: "Success (k8s error, returning empty)",
+			Data:    []Namespace{},
+		})
+		return
+	}
+	
+	if len(nsList) == 0 {
 		h.cache.Set(emptyKey, true, 0)
 		writeJSON(w, http.StatusOK, Response{
 			Code:    CodeSuccess,
@@ -477,6 +507,28 @@ func (h *Handler) getReportsFromCache(typeName, clusterFilter string, namespaceF
 		reports = append(reports, report)
 	}
 
+	// Sort for stable results: cluster -> namespace -> name
+	sort.Slice(reports, func(i, j int) bool {
+		// 1. Sort by cluster
+		if reports[i].Cluster != reports[j].Cluster {
+			return reports[i].Cluster < reports[j].Cluster
+		}
+		// 2. Sort by namespace (empty namespace goes last)
+		nsI := reports[i].Namespace
+		nsJ := reports[j].Namespace
+		if nsI == "" && nsJ != "" {
+			return false
+		}
+		if nsI != "" && nsJ == "" {
+			return true
+		}
+		if nsI != nsJ {
+			return nsI < nsJ
+		}
+		// 3. Sort by name
+		return reports[i].Name < reports[j].Name
+	})
+
 	utils.LogDebug("getReportsFromCache result", map[string]interface{}{
 		"typeName": typeName,
 		"count":    len(reports),
@@ -537,19 +589,36 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 	}
 
 	clusterFilter, namespaceFilters, page, pageSize := h.parseQueryParams(r)
-	if reportKind != nil && !reportKind.Namespaced {
+	if !reportKind.Namespaced {
 		namespaceFilters = []string{}
 	}
+
+	// Try to get counts from counter cache first (O(1) lookup)
+	var total, withVulnerabilities int
+	var countFound bool
+
+	if len(namespaceFilters) > 0 && reportKind.Namespaced {
+		// Namespace-filtered query
+		total, withVulnerabilities, countFound = GetReportCountsByNamespace(clusterFilter, typeName, namespaceFilters)
+	} else {
+		// Cluster-level query
+		total, withVulnerabilities, countFound = GetReportCounts(clusterFilter, typeName)
+	}
+
+	// Get paginated reports from cache
 	allReports := h.getReportsFromCache(typeName, clusterFilter, namespaceFilters)
 
-	withVulnerabilities := 0
-	for _, report := range allReports {
-		if h.hasVulnerabilities(report) {
-			withVulnerabilities++
+	// Fallback: if counter cache miss, calculate from reports
+	if !countFound {
+		total = len(allReports)
+		withVulnerabilities = 0
+		for _, report := range allReports {
+			if h.hasVulnerabilities(report) {
+				withVulnerabilities++
+			}
 		}
 	}
 
-	total := len(allReports)
 	start := (page - 1) * pageSize
 	end := start + pageSize
 	if start > total {
@@ -560,7 +629,7 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 	}
 
 	var paginatedReports []Report
-	if start < total {
+	if start < len(allReports) {
 		if end <= len(allReports) {
 			paginatedReports = allReports[start:end]
 		} else {
@@ -570,7 +639,7 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 		paginatedReports = []Report{}
 	}
 
-	utils.LogInfo("GetReportsByTypeV1", map[string]interface{}{
+	utils.LogDebug("GetReportsByTypeV1", map[string]interface{}{
 		"typeName":            typeName,
 		"clusterFilter":       clusterFilter,
 		"namespaceFilters":    namespaceFilters,
@@ -579,6 +648,7 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 		"page":                page,
 		"pageSize":            pageSize,
 		"returned":            len(paginatedReports),
+		"countFromCache":      countFound,
 	})
 
 	writeJSON(w, http.StatusOK, Response{
@@ -602,16 +672,19 @@ func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typ
 	}
 
 	clusterFilter, namespaceFilters, _, _ := h.parseQueryParams(r)
+
+	// First, find the report in summary cache to get cluster/namespace info
+	var cluster, namespace string
 	items := h.cache.Items()
-	for k, v := range items {
-		cluster, namespace, reportType, reportNameFromKey, ok := h.parseReportKey(k)
+	for k := range items {
+		c, ns, reportType, reportNameFromKey, ok := h.parseReportKey(k)
 		if !ok {
 			continue
 		}
 		if reportType != typeName || reportNameFromKey != reportName {
 			continue
 		}
-		if clusterFilter != "" && cluster != clusterFilter {
+		if clusterFilter != "" && c != clusterFilter {
 			continue
 		}
 		if len(namespaceFilters) > 0 {
@@ -622,7 +695,7 @@ func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typ
 					hasAll = true
 					break
 				}
-				if namespace == nf {
+				if ns == nf {
 					matched = true
 					break
 				}
@@ -631,101 +704,106 @@ func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typ
 				continue
 			}
 		}
+		cluster = c
+		namespace = ns
+		break
+	}
 
-		var report Report
-		switch val := v.(type) {
-		case Report:
-			report = val
-		case map[string]interface{}:
-			b, err := json.Marshal(val)
-			if err != nil {
-				continue
-			}
-			if err := json.Unmarshal(b, &report); err != nil {
-				continue
-			}
-		default:
-			continue
-		}
+	if cluster == "" {
+		writeError(w, http.StatusNotFound, "Report not found")
+		return
+	}
 
-		if report.Type == "" {
-			report.Type = reportType
-		}
-		if report.Cluster == "" {
-			report.Cluster = cluster
-		}
-		if report.Namespace == "" {
-			report.Namespace = namespace
-		}
-		if report.Name == "" {
-			report.Name = reportNameFromKey
-		}
+	// Check detail cache first (has full data with vulnerabilities/checks/etc)
+	// Use TTL-aware getter to only trigger refresh when cache is near expiration
+	if cachedDetail, found, ttlRemaining := GetReportDetailWithTTL(cluster, namespace, typeName, reportName); found {
+		utils.LogDebug("Returning cached report detail", map[string]interface{}{
+			"cluster":      cluster,
+			"namespace":    namespace,
+			"type":         typeName,
+			"name":         reportName,
+			"ttlRemaining": ttlRemaining.String(),
+		})
 
-		// Check if report data has vulnerabilities, if not fetch from Kubernetes
-		hasVulnerabilities := false
-		if reportData, ok := report.Data.(map[string]interface{}); ok {
-			// Check if it's the full Kubernetes object structure (has "report" field with vulnerabilities)
-			if reportObj, ok := reportData["report"].(map[string]interface{}); ok {
-				if vulnerabilities, ok := reportObj["vulnerabilities"]; ok {
-					if vulnArray, ok := vulnerabilities.([]interface{}); ok && len(vulnArray) > 0 {
-						hasVulnerabilities = true
-					}
-				}
-			} else {
-				// No "report" field means it's simplified data
-				// Simplified data structure: {summary: {...}, repository: "...", scanner: "..."}
-				// Full data structure: {report: {vulnerabilities: [...], summary: {...}}}
-				hasVulnerabilities = false
-			}
-		}
-
-		if !hasVulnerabilities {
-			// Fetch full report from Kubernetes
-			clusterClient := GetClusterClient(cluster)
-			if clusterClient != nil {
-				utils.LogInfo("Fetching full report from Kubernetes", map[string]interface{}{
-					"cluster":   cluster,
-					"namespace": namespace,
-					"type":      typeName,
-					"name":      reportNameFromKey,
-				})
-				fullReport, err := clusterClient.Client.GetReportDetails(r.Context(), *reportKind, namespace, reportNameFromKey)
-				if err == nil && fullReport != nil {
-					report.Data = fullReport.Data
-					report.Status = fullReport.Status
-					// Update cache with full data
-					UpsertReportToCache(report)
-					utils.LogInfo("Fetched full report from Kubernetes", map[string]interface{}{
-						"cluster":   cluster,
-						"namespace": namespace,
-						"type":      typeName,
-						"name":      reportNameFromKey,
-					})
-				} else {
-					utils.LogWarning("Failed to fetch full report from Kubernetes", map[string]interface{}{
-						"cluster":   cluster,
-						"namespace": namespace,
-						"type":      typeName,
-						"name":      reportNameFromKey,
-						"error":     err,
-					})
-				}
-			} else {
-				utils.LogWarning("Cluster client not found", map[string]interface{}{
-					"cluster": cluster,
-				})
-			}
+		// Only trigger async refresh if TTL is less than 2 minutes
+		// Since detail TTL is 5 minutes, refresh when ~40% remaining
+		if ttlRemaining < 2*time.Minute {
+			RefreshReportDetailAsync(cluster, namespace, typeName, reportName, *reportKind)
 		}
 
 		writeJSON(w, http.StatusOK, Response{
 			Code:    CodeSuccess,
 			Message: "Success",
-			Data:    report,
+			Data:    cachedDetail,
 		})
 		return
 	}
 
-	writeError(w, http.StatusNotFound, "Report not found")
+	// No detail cache, fetch from Kubernetes synchronously
+	clusterClient := GetClusterClient(cluster)
+	if clusterClient == nil {
+		writeError(w, http.StatusInternalServerError, "Cluster client not found")
+		return
+	}
+
+	utils.LogDebug("Fetching full report from Kubernetes (no cache)", map[string]interface{}{
+		"cluster":   cluster,
+		"namespace": namespace,
+		"type":      typeName,
+		"name":      reportName,
+	})
+
+	fullReport, err := clusterClient.Client.GetReportDetails(r.Context(), *reportKind, namespace, reportName)
+	if err != nil {
+		// Check if the request was canceled by the client (context canceled)
+		if r.Context().Err() == context.Canceled {
+			// Client canceled the request, don't log as warning or return error
+			// The client is already gone, so we can't send a response anyway
+			utils.LogDebug("Request canceled by client", map[string]interface{}{
+				"cluster":   cluster,
+				"namespace": namespace,
+				"type":      typeName,
+				"name":      reportName,
+			})
+			return
+		}
+		
+		utils.LogWarning("Failed to fetch report from Kubernetes", map[string]interface{}{
+			"cluster":   cluster,
+			"namespace": namespace,
+			"type":      typeName,
+			"name":      reportName,
+			"error":     err.Error(),
+		})
+		writeError(w, http.StatusInternalServerError, "Failed to fetch report details")
+		return
+	}
+
+	report := Report{
+		Type:      typeName,
+		Cluster:   cluster,
+		Namespace: namespace,
+		Name:      reportName,
+		Status:    fullReport.Status,
+		Data:      fullReport.Data,
+		UpdatedAt: time.Now(),
+	}
+
+	// Cache the full detail for future requests
+	SetReportDetail(report)
+
+	utils.LogDebug("Fetched and cached report detail", map[string]interface{}{
+		"cluster":   cluster,
+		"namespace": namespace,
+		"type":      typeName,
+		"name":      reportName,
+	})
+
+	writeJSON(w, http.StatusOK, Response{
+		Code:    CodeSuccess,
+		Message: "Success",
+		Data:    report,
+	})
 }
 
 func UpsertClusterToCache(cluster Cluster) {

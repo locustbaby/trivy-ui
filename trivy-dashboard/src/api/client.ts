@@ -43,9 +43,10 @@ export interface PaginatedResponse<T> {
   data: T[]
 }
 
-async function fetchApi<T>(url: string): Promise<T> {
+async function fetchApi<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${url}`, {
     cache: "no-store",
+    signal,
     headers: {
       "Cache-Control": "no-cache",
     },
@@ -84,7 +85,7 @@ export const api = {
     return fetchApi<PaginatedResponse<Report>>(url)
   },
 
-  getReportDetails: (typeName: string, reportName: string): Promise<Report> => {
-    return fetchApi<Report>(`/api/v1/type/${typeName}/${reportName}`)
+  getReportDetails: (typeName: string, reportName: string, signal?: AbortSignal): Promise<Report> => {
+    return fetchApi<Report>(`/api/v1/type/${typeName}/${reportName}`, signal)
   },
 }

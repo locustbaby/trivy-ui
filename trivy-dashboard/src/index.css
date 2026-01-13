@@ -29,10 +29,17 @@
     --chart-3: 197 37% 24%;
     --chart-4: 43 74% 66%;
     --chart-5: 27 87% 67%;
-    
+
     /* Custom gradient colors */
     --gradient-start: 221.2 83.2% 53.3%;
     --gradient-end: 250 83.2% 60%;
+
+    /* Severity colors */
+    --severity-critical: 0 84% 60%;
+    --severity-high: 30 100% 50%;
+    --severity-medium: 45 100% 50%;
+    --severity-low: 210 100% 50%;
+    --severity-none: 142 76% 36%;
   }
 
   .dark {
@@ -63,6 +70,13 @@
     
     --gradient-start: 217.2 91.2% 59.8%;
     --gradient-end: 250 91.2% 70%;
+
+    /* Severity colors (dark mode) */
+    --severity-critical: 0 84% 60%;
+    --severity-high: 30 100% 50%;
+    --severity-medium: 45 100% 50%;
+    --severity-low: 210 100% 50%;
+    --severity-none: 142 76% 36%;
   }
 }
 

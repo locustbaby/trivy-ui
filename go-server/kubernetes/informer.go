@@ -19,6 +19,9 @@ import (
 type CacheUpdater interface {
 	SetReport(cluster, namespace, reportType, name string, report *Report)
 	DeleteReport(cluster, namespace, reportType, name string)
+	IncrementCount(cluster, namespace, reportType string, hasVuln bool)
+	DecrementCount(cluster, namespace, reportType string, hasVuln bool)
+	AdjustVulnCount(cluster, namespace, reportType string, delta int)
 }
 
 type ReportInformerManager struct {
@@ -54,9 +57,13 @@ func (m *ReportInformerManager) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Use a reasonable resync period to recover from missed events
+	// 10 minutes is a good balance between freshness and API load
+	resyncPeriod := 10 * time.Minute
+
 	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
 		m.client.dynamic,
-		0,
+		resyncPeriod,
 		metav1.NamespaceAll,
 		nil,
 	)
@@ -70,15 +77,9 @@ func (m *ReportInformerManager) Start() error {
 			Resource: reportType.Name,
 		}
 
-		var informer cache.SharedInformer
-		if reportType.Namespaced {
+		informer := factory.ForResource(gvr).Informer()
 
-			informer = factory.ForResource(gvr).Informer()
-		} else {
-
-			informer = factory.ForResource(gvr).Informer()
-		}
-
+		// Add event handlers with error recovery logging
 		informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				m.onAdd(reportType, obj)
@@ -91,32 +92,60 @@ func (m *ReportInformerManager) Start() error {
 			},
 		})
 
+		// Set error handler to log watch errors (helps debug stream errors)
+		informer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
+			utils.LogWarning("Informer watch error, will retry", map[string]interface{}{
+				"cluster":    m.clusterName,
+				"reportType": reportType.Name,
+				"error":      err.Error(),
+			})
+		})
+
 		m.informers[reportType.Name] = informer
 	}
 
 	factory.Start(m.ctx.Done())
 
-	timeout := 30 * time.Second
+	// Use longer timeout for initial sync (5 minutes) as SBOM reports can be very large
+	timeout := 5 * time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// Wait for each informer to sync, but don't fail if one times out
+	// This allows the system to start even if some report types are slow to sync
+	syncedCount := 0
 	for name, informer := range m.informers {
-		if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
-			return fmt.Errorf("failed to sync informer for %s", name)
+		// Use per-informer timeout (2 minutes each)
+		perInformerCtx, perCancel := context.WithTimeout(ctx, 2*time.Minute)
+		if cache.WaitForCacheSync(perInformerCtx.Done(), informer.HasSynced) {
+			items := informer.GetStore().List()
+			utils.LogInfo("Informer synced", map[string]interface{}{
+				"cluster":    m.clusterName,
+				"reportType": name,
+				"count":      len(items),
+			})
+			syncedCount++
+		} else {
+			utils.LogWarning("Informer sync timeout, will continue in background", map[string]interface{}{
+				"cluster":    m.clusterName,
+				"reportType": name,
+			})
 		}
-		items := informer.GetStore().List()
-		utils.LogInfo("Informer synced", map[string]interface{}{
-			"cluster":    m.clusterName,
-			"reportType": name,
-			"count":      len(items),
-		})
+		perCancel()
 	}
 
-	time.Sleep(2 * time.Second)
+	if syncedCount == 0 {
+		return fmt.Errorf("no informers synced successfully")
+	}
 
+	// Load existing resources from synced informers
 	for _, reportType := range reports {
 		informer, ok := m.informers[reportType.Name]
 		if !ok {
+			continue
+		}
+		// Only load if informer has synced
+		if !informer.HasSynced() {
 			continue
 		}
 		items := informer.GetStore().List()
@@ -130,7 +159,11 @@ func (m *ReportInformerManager) Start() error {
 		}
 	}
 
-	utils.LogInfo("Started informers for report types", map[string]interface{}{"cluster": m.clusterName, "count": len(m.informers)})
+	utils.LogInfo("Started informers for report types", map[string]interface{}{
+		"cluster":      m.clusterName,
+		"total":        len(m.informers),
+		"synced":       syncedCount,
+	})
 	return nil
 }
 
@@ -141,6 +174,22 @@ func (m *ReportInformerManager) Stop() {
 	m.informers = make(map[string]cache.SharedInformer)
 }
 
+func (m *ReportInformerManager) GetInformer(reportType string) cache.SharedInformer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.informers[reportType]
+}
+
+func (m *ReportInformerManager) GetAllInformers() map[string]cache.SharedInformer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[string]cache.SharedInformer, len(m.informers))
+	for k, v := range m.informers {
+		result[k] = v
+	}
+	return result
+}
+
 func (m *ReportInformerManager) onAdd(reportType config.ReportKind, obj interface{}) {
 	unstructuredObj, ok := obj.(*unstructured.Unstructured)
 	if !ok {
@@ -149,17 +198,34 @@ func (m *ReportInformerManager) onAdd(reportType config.ReportKind, obj interfac
 	report := m.convertToReport(reportType, unstructuredObj)
 	if report != nil && m.cacheUpdater != nil {
 		m.cacheUpdater.SetReport(m.clusterName, report.Namespace, report.Type, report.Name, report)
+		// Update counters
+		hasVuln := m.hasVulnerabilities(unstructuredObj.Object)
+		m.cacheUpdater.IncrementCount(m.clusterName, report.Namespace, report.Type, hasVuln)
 	}
 }
 
 func (m *ReportInformerManager) onUpdate(reportType config.ReportKind, oldObj, newObj interface{}) {
-	unstructuredObj, ok := newObj.(*unstructured.Unstructured)
-	if !ok {
+	oldUnstructured, oldOk := oldObj.(*unstructured.Unstructured)
+	newUnstructured, newOk := newObj.(*unstructured.Unstructured)
+	if !oldOk || !newOk {
 		return
 	}
-	report := m.convertToReport(reportType, unstructuredObj)
+	report := m.convertToReport(reportType, newUnstructured)
 	if report != nil && m.cacheUpdater != nil {
 		m.cacheUpdater.SetReport(m.clusterName, report.Namespace, report.Type, report.Name, report)
+
+		// Check if vulnerability status changed and adjust counters
+		oldHasVuln := m.hasVulnerabilities(oldUnstructured.Object)
+		newHasVuln := m.hasVulnerabilities(newUnstructured.Object)
+		if oldHasVuln != newHasVuln {
+			if newHasVuln {
+				// Changed from no vulnerabilities to has vulnerabilities
+				m.cacheUpdater.AdjustVulnCount(m.clusterName, report.Namespace, report.Type, 1)
+			} else {
+				// Changed from has vulnerabilities to no vulnerabilities
+				m.cacheUpdater.AdjustVulnCount(m.clusterName, report.Namespace, report.Type, -1)
+			}
+		}
 	}
 }
 
@@ -171,20 +237,90 @@ func (m *ReportInformerManager) onDelete(reportType config.ReportKind, obj inter
 	namespace := unstructuredObj.GetNamespace()
 	name := unstructuredObj.GetName()
 	if m.cacheUpdater != nil {
+		// Get vulnerability status before deleting
+		hasVuln := m.hasVulnerabilities(unstructuredObj.Object)
 		m.cacheUpdater.DeleteReport(m.clusterName, namespace, reportType.Name, name)
+		// Update counters
+		m.cacheUpdater.DecrementCount(m.clusterName, namespace, reportType.Name, hasVuln)
 	}
 }
 
 func (m *ReportInformerManager) convertToReport(reportType config.ReportKind, obj *unstructured.Unstructured) *Report {
 	status := m.extractStatus(obj.Object)
+
+	// Extract only summary data for cache, not full details (vulnerabilities, components, etc.)
+	// This significantly reduces memory usage and avoids stream errors for large reports like SBOM
+	summaryData := m.extractSummaryData(obj.Object)
+
 	return &Report{
 		Type:      reportType.Name,
 		Cluster:   m.clusterName,
 		Namespace: obj.GetNamespace(),
 		Name:      obj.GetName(),
 		Status:    status,
-		Data:      obj.Object,
+		Data:      summaryData,
 	}
+}
+
+// extractSummaryData extracts only the essential metadata and summary from a report
+// This avoids storing large arrays like vulnerabilities, components, checks in cache
+func (m *ReportInformerManager) extractSummaryData(obj map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// Copy essential metadata
+	if apiVersion, ok := obj["apiVersion"]; ok {
+		result["apiVersion"] = apiVersion
+	}
+	if kind, ok := obj["kind"]; ok {
+		result["kind"] = kind
+	}
+	if metadata, ok := obj["metadata"].(map[string]interface{}); ok {
+		// Only copy essential metadata fields
+		metaCopy := make(map[string]interface{})
+		for _, field := range []string{"name", "namespace", "uid", "creationTimestamp", "labels", "annotations"} {
+			if v, exists := metadata[field]; exists {
+				metaCopy[field] = v
+			}
+		}
+		result["metadata"] = metaCopy
+	}
+
+	// Extract report summary without large arrays
+	if reportObj, ok := obj["report"].(map[string]interface{}); ok {
+		reportCopy := make(map[string]interface{})
+
+		// Copy summary (counts)
+		if summary, ok := reportObj["summary"].(map[string]interface{}); ok {
+			reportCopy["summary"] = summary
+		}
+
+		// Copy artifact info
+		if artifact, ok := reportObj["artifact"].(map[string]interface{}); ok {
+			reportCopy["artifact"] = artifact
+		}
+
+		// Copy scanner info
+		if scanner, ok := reportObj["scanner"].(map[string]interface{}); ok {
+			reportCopy["scanner"] = scanner
+		}
+
+		// Copy registry info
+		if registry, ok := reportObj["registry"].(map[string]interface{}); ok {
+			reportCopy["registry"] = registry
+		}
+
+		// Copy updateTimestamp
+		if updateTimestamp, ok := reportObj["updateTimestamp"]; ok {
+			reportCopy["updateTimestamp"] = updateTimestamp
+		}
+
+		// DO NOT copy large arrays: vulnerabilities, components, checks, secrets, etc.
+		// These will be fetched on-demand when user requests report details
+
+		result["report"] = reportCopy
+	}
+
+	return result
 }
 
 func (m *ReportInformerManager) extractStatus(obj map[string]interface{}) string {
@@ -205,4 +341,19 @@ func (m *ReportInformerManager) extractStatus(obj map[string]interface{}) string
 		}
 	}
 	return status
+}
+
+// hasVulnerabilities checks if a report has any vulnerabilities based on summary counts
+func (m *ReportInformerManager) hasVulnerabilities(obj map[string]interface{}) bool {
+	if reportObj, ok := obj["report"].(map[string]interface{}); ok {
+		if summaryData, ok := reportObj["summary"].(map[string]interface{}); ok {
+			severities := []string{"criticalCount", "highCount", "mediumCount", "lowCount"}
+			for _, key := range severities {
+				if count, ok := summaryData[key].(float64); ok && count > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

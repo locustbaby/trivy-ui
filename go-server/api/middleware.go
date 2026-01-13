@@ -3,6 +3,7 @@ package api
 import (
 	"compress/gzip"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -37,22 +38,24 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 }
 
 func getClientIP(r *http.Request) string {
-	ip := r.Header.Get("X-Forwarded-For")
-	if ip != "" {
-		parts := strings.Split(ip, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
+	// Check proxy headers first (in order of trust)
+	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
+		// X-Forwarded-For can contain multiple IPs, take the first (client IP)
+		if idx := strings.Index(ip, ","); idx != -1 {
+			return strings.TrimSpace(ip[:idx])
 		}
+		return strings.TrimSpace(ip)
 	}
-	ip = r.Header.Get("X-Real-Ip")
-	if ip != "" {
-		return ip
+	if ip := r.Header.Get("X-Real-IP"); ip != "" {
+		return strings.TrimSpace(ip)
 	}
-	ip = r.Header.Get("X-Forwarded")
-	if ip != "" {
-		return ip
+	// Fall back to RemoteAddr, handling both IPv4 and IPv6
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// RemoteAddr might not have a port (unlikely but handle it)
+		return r.RemoteAddr
 	}
-	return strings.Split(r.RemoteAddr, ":")[0]
+	return ip
 }
 
 func AccessLogHandler(next http.Handler) http.Handler {
@@ -65,18 +68,7 @@ func AccessLogHandler(next http.Handler) http.Handler {
 
 		next.ServeHTTP(rw, r)
 
-		duration := time.Since(start)
-		clientIP := getClientIP(r)
-		userAgent := r.Header.Get("User-Agent")
-		if userAgent == "" {
-			userAgent = "-"
-		}
-		referer := r.Referer()
-		if referer == "" {
-			referer = "-"
-		}
-
-		utils.LogAccess(clientIP, r.Method, r.URL.Path, r.Proto, rw.statusCode, rw.size, referer, userAgent, duration)
+		utils.LogAccess(getClientIP(r), r.Method, r.URL.Path, rw.statusCode, rw.size, time.Since(start))
 	})
 }
 

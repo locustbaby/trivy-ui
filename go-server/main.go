@@ -33,6 +33,15 @@ func main() {
 		utils.LogWarning("Failed to load cache", map[string]interface{}{"error": err.Error()})
 	}
 
+	hasCache := api.HasCacheData()
+	if hasCache {
+		utils.LogInfo("Cache data found, starting server quickly", map[string]interface{}{
+			"message": "Kubernetes initialization will happen in background",
+		})
+	} else {
+		utils.LogInfo("No cache data found, initializing Kubernetes clients first")
+	}
+
 	// 多集群 client map
 	clients := make(map[string]*kubernetes.Client)
 
@@ -121,83 +130,94 @@ func main() {
 		}
 	}
 
-	registry := config.GetGlobalRegistry()
-	var firstRestConfig *rest.Config
+	initK8s := func() {
+		registry := config.GetGlobalRegistry()
+		var firstRestConfig *rest.Config
 
-	for _, c := range clustersToInit {
-		k8sClient, err := kubernetes.NewClient(c.Kubeconfig)
-		if err != nil {
-			utils.LogWarning("Failed to create Kubernetes client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
-			continue
-		}
-		clients[c.Name] = k8sClient
+		for _, c := range clustersToInit {
+			k8sClient, err := kubernetes.NewClient(c.Kubeconfig)
+			if err != nil {
+				utils.LogWarning("Failed to create Kubernetes client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
+				continue
+			}
+			clients[c.Name] = k8sClient
 
-		restConfig, _ := clientcmd.BuildConfigFromFlags("", c.Kubeconfig)
-		if firstRestConfig == nil && restConfig != nil {
-			firstRestConfig = restConfig
-			utils.LogInfo("Discovering Trivy Operator CRDs")
-			if err := registry.DiscoverCRDs(restConfig); err != nil {
-				utils.LogWarning("Failed to discover CRDs", map[string]interface{}{
-					"error":   err.Error(),
-					"message": "Will retry in background. Make sure Trivy Operator is installed.",
-				})
-				
-				// 启动后台重试任务
-				go func(cfg *rest.Config) {
-					ticker := time.NewTicker(30 * time.Second)
-					defer ticker.Stop()
+			restConfig, _ := clientcmd.BuildConfigFromFlags("", c.Kubeconfig)
+			if firstRestConfig == nil && restConfig != nil {
+				firstRestConfig = restConfig
+				utils.LogInfo("Discovering Trivy Operator CRDs")
+				if err := registry.DiscoverCRDs(restConfig); err != nil {
+					utils.LogWarning("Failed to discover CRDs", map[string]interface{}{
+						"error":   err.Error(),
+						"message": "Will retry in background. Make sure Trivy Operator is installed.",
+					})
 					
-					retryCount := 0
-					for range ticker.C {
-						retryCount++
-						utils.LogDebug("Retrying CRD discovery", map[string]interface{}{"attempt": retryCount})
+					go func(cfg *rest.Config) {
+						ticker := time.NewTicker(30 * time.Second)
+						defer ticker.Stop()
 						
-						if err := registry.DiscoverCRDs(cfg); err == nil {
-							reports := registry.GetAllReports()
-							utils.LogInfo("Successfully discovered CRDs on retry", map[string]interface{}{
-								"attempt": retryCount,
-								"count":   len(reports),
-							})
-							return
+						retryCount := 0
+						for range ticker.C {
+							retryCount++
+							utils.LogDebug("Retrying CRD discovery", map[string]interface{}{"attempt": retryCount})
+							
+							if err := registry.DiscoverCRDs(cfg); err == nil {
+								reports := registry.GetAllReports()
+								utils.LogInfo("Successfully discovered CRDs on retry", map[string]interface{}{
+									"attempt": retryCount,
+									"count":   len(reports),
+								})
+								return
+							}
+							
+							if retryCount >= 20 {
+								utils.LogError("Failed to discover CRDs after 20 retries", map[string]interface{}{
+									"message": "Please check if Trivy Operator is installed correctly",
+								})
+								return
+							}
 						}
-						
-						// 最多重试 20 次（10 分钟）
-						if retryCount >= 20 {
-							utils.LogError("Failed to discover CRDs after 20 retries", map[string]interface{}{
-								"message": "Please check if Trivy Operator is installed correctly",
-							})
-							return
+					}(restConfig)
+				} else {
+					reports := registry.GetAllReports()
+					utils.LogInfo("Discovered Trivy Operator CRD types", map[string]interface{}{"count": len(reports)})
+					for _, r := range reports {
+						scope := "Namespaced"
+						if !r.Namespaced {
+							scope = "Cluster"
 						}
+						utils.LogDebug("CRD type discovered", map[string]interface{}{"name": r.Name, "kind": r.Kind, "scope": scope})
 					}
-				}(restConfig)
-			} else {
-				reports := registry.GetAllReports()
-				utils.LogInfo("Discovered Trivy Operator CRD types", map[string]interface{}{"count": len(reports)})
-				for _, r := range reports {
-					scope := "Namespaced"
-					if !r.Namespaced {
-						scope = "Cluster"
-					}
-					utils.LogDebug("CRD type discovered", map[string]interface{}{"name": r.Name, "kind": r.Kind, "scope": scope})
 				}
+			}
+
+			if err := api.SetClusterClient(c.Name, k8sClient); err != nil {
+				utils.LogWarning("Failed to set cluster client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
+			}
+
+			cacheUpdater := api.NewCacheUpdater()
+			if err := k8sClient.StartInformer(c.Name, cacheUpdater); err != nil {
+				utils.LogWarning("Failed to start informer", map[string]interface{}{"cluster": c.Name, "error": err.Error(), "message": "Reports will still be available but won't auto-update via watch"})
+			} else {
+				utils.LogInfo("Started informer for cluster", map[string]interface{}{"cluster": c.Name, "message": "Reports will auto-update on changes"})
 			}
 		}
 
-		if err := api.SetClusterClient(c.Name, k8sClient); err != nil {
-			utils.LogWarning("Failed to set cluster client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
+		if hasCache {
+			go func() {
+				time.Sleep(10 * time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				api.ValidateAndCleanupCache(ctx)
+			}()
 		}
 
-		cacheUpdater := api.NewCacheUpdater()
-		if err := k8sClient.StartInformer(c.Name, cacheUpdater); err != nil {
-			utils.LogWarning("Failed to start informer", map[string]interface{}{"cluster": c.Name, "error": err.Error(), "message": "Reports will still be available but won't auto-update via watch"})
-		} else {
-			utils.LogInfo("Started informer for cluster", map[string]interface{}{"cluster": c.Name, "message": "Reports will auto-update on changes"})
+		if !hasCache {
+			go api.Warmup(context.Background())
 		}
 	}
 
-	go api.Warmup(context.Background())
-
-	// Check for static files in different locations
+	// Check for static files in different locations (do this before initK8s to avoid delay)
 	staticPath := os.Getenv("STATIC_PATH")
 	if staticPath == "" {
 		possiblePaths := []string{
@@ -226,15 +246,24 @@ func main() {
 	utils.LogInfo("Using static files", map[string]interface{}{"path": staticPath})
 
 	var firstClient *kubernetes.Client
-	for _, c := range clustersToInit {
-		if client, ok := clients[c.Name]; ok {
-			firstClient = client
-			break
+	if hasCache {
+		// When cache exists, start K8s initialization in background
+		// Server can serve cached data immediately with nil client
+		go initK8s()
+		utils.LogInfo("Starting with cached data, K8s clients initializing in background")
+	} else {
+		// No cache - must initialize K8s synchronously to have a working client
+		initK8s()
+		for _, c := range clustersToInit {
+			if client, ok := clients[c.Name]; ok {
+				firstClient = client
+				break
+			}
 		}
-	}
-	if firstClient == nil {
-		utils.LogError("No Kubernetes client initialized", nil)
-		log.Fatalf("No Kubernetes client initialized!")
+		if firstClient == nil {
+			utils.LogError("No Kubernetes client initialized", nil)
+			log.Fatalf("No Kubernetes client initialized!")
+		}
 	}
 	router := api.NewRouter(firstClient, staticPath)
 	utils.LogInfo("Router created")
