@@ -62,6 +62,7 @@ func (m *ReportInformerManager) Start() error {
 	)
 
 	for _, reportType := range reports {
+		reportType := reportType // Create local copy to avoid closure capture issue
 		group, version := parseAPIVersion(reportType.APIVersion)
 		gvr := schema.GroupVersionResource{
 			Group:    group,

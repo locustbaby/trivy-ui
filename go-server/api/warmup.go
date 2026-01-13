@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"trivy-ui/config"
@@ -25,8 +26,12 @@ func Warmup(ctx context.Context) {
 
 	if vulnerabilityReportType != nil {
 		utils.LogInfo("Warming up vulnerabilityreports", map[string]interface{}{"cluster_count": len(clients)})
+		
+		var wg sync.WaitGroup
 		for clusterName, clusterClient := range clients {
+			wg.Add(1)
 			go func(name string, cc *ClusterClient) {
+				defer wg.Done()
 				ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
 
@@ -68,6 +73,7 @@ func Warmup(ctx context.Context) {
 				utils.LogInfo("Warmed up vulnerabilityreports for cluster", map[string]interface{}{"cluster": name})
 			}(clusterName, clusterClient)
 		}
+		wg.Wait()
 	}
 
 	utils.LogInfo("Warmup completed")

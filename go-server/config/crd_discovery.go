@@ -93,8 +93,12 @@ func (r *CRDRegistry) DiscoverCRDsFromAPIResources(config *rest.Config) error {
 			}
 
 			reports = append(reports, reportKind)
-			reportsByName[apiResource.Name] = &reports[len(reports)-1]
 		}
+	}
+
+	// Build pointer map after slice is fully constructed to avoid dangling pointers
+	for i := range reports {
+		reportsByName[reports[i].Name] = &reports[i]
 	}
 
 	r.mu.Lock()
@@ -158,7 +162,11 @@ func (r *CRDRegistry) DiscoverCRDsFromCRDList(config *rest.Config) error {
 		}
 
 		reports = append(reports, reportKind)
-		reportsByName[resourceName] = &reports[len(reports)-1]
+	}
+
+	// Build pointer map after slice is fully constructed to avoid dangling pointers
+	for i := range reports {
+		reportsByName[reports[i].Name] = &reports[i]
 	}
 
 	r.mu.Lock()
