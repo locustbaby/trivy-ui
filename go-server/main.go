@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/cors"
@@ -57,10 +58,8 @@ func main() {
 		kubeconfigDir = "/kubeconfigs"
 	}
 
-	var clustersToInit []struct {
-		Name       string
-		Kubeconfig string
-	}
+	type clusterInfo struct{ Name, Kubeconfig string }
+	var clustersToInit []clusterInfo
 
 	if kubeconfigDir != "" {
 		if stat, err := os.Stat(kubeconfigDir); err == nil && stat.IsDir() {
@@ -102,13 +101,13 @@ func main() {
 					utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
 					continue
 				}
-				clustersToInit = append(clustersToInit, struct{ Name, Kubeconfig string }{clusterName, path})
+				clustersToInit = append(clustersToInit, clusterInfo{clusterName, path})
 				clients[clusterName] = k8sClient
 			}
 		}
 	}
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-		clustersToInit = append(clustersToInit, struct{ Name, Kubeconfig string }{"incluster", ""})
+		clustersToInit = append(clustersToInit, clusterInfo{"incluster", ""})
 	}
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
@@ -125,42 +124,59 @@ func main() {
 						contextName = parts[1]
 					}
 				}
-				clustersToInit = append(clustersToInit, struct{ Name, Kubeconfig string }{contextName, kubeconfig})
+				clustersToInit = append(clustersToInit, clusterInfo{contextName, kubeconfig})
 			}
 		}
 	}
 
+	initCluster := func(c clusterInfo) *kubernetes.Client {
+		k8sClient, err := kubernetes.NewClient(c.Kubeconfig)
+		if err != nil {
+			utils.LogWarning("Failed to create Kubernetes client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
+			return nil
+		}
+
+		if err := api.SetClusterClient(c.Name, k8sClient); err != nil {
+			utils.LogWarning("Failed to set cluster client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
+		}
+
+		cacheUpdater := api.NewCacheUpdater()
+		if err := k8sClient.StartInformer(c.Name, cacheUpdater); err != nil {
+			utils.LogWarning("Failed to start informer", map[string]interface{}{"cluster": c.Name, "error": err.Error(), "message": "Reports will still be available but won't auto-update via watch"})
+		} else {
+			utils.LogInfo("Started informer for cluster", map[string]interface{}{"cluster": c.Name, "message": "Reports will auto-update on changes"})
+		}
+		return k8sClient
+	}
+
 	initK8s := func() {
 		registry := config.GetGlobalRegistry()
-		var firstRestConfig *rest.Config
 
-		for _, c := range clustersToInit {
-			k8sClient, err := kubernetes.NewClient(c.Kubeconfig)
-			if err != nil {
-				utils.LogWarning("Failed to create Kubernetes client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
-				continue
-			}
-			clients[c.Name] = k8sClient
+		if len(clustersToInit) == 0 {
+			return
+		}
 
-			restConfig, _ := clientcmd.BuildConfigFromFlags("", c.Kubeconfig)
-			if firstRestConfig == nil && restConfig != nil {
-				firstRestConfig = restConfig
+		first := clustersToInit[0]
+		firstClient, err := kubernetes.NewClient(first.Kubeconfig)
+		if err != nil {
+			utils.LogWarning("Failed to create Kubernetes client", map[string]interface{}{"cluster": first.Name, "error": err.Error()})
+		} else {
+			clients[first.Name] = firstClient
+			restConfig, _ := clientcmd.BuildConfigFromFlags("", first.Kubeconfig)
+			if restConfig != nil {
 				utils.LogInfo("Discovering Trivy Operator CRDs")
 				if err := registry.DiscoverCRDs(restConfig); err != nil {
 					utils.LogWarning("Failed to discover CRDs", map[string]interface{}{
 						"error":   err.Error(),
 						"message": "Will retry in background. Make sure Trivy Operator is installed.",
 					})
-					
 					go func(cfg *rest.Config) {
 						ticker := time.NewTicker(30 * time.Second)
 						defer ticker.Stop()
-						
 						retryCount := 0
 						for range ticker.C {
 							retryCount++
 							utils.LogDebug("Retrying CRD discovery", map[string]interface{}{"attempt": retryCount})
-							
 							if err := registry.DiscoverCRDs(cfg); err == nil {
 								reports := registry.GetAllReports()
 								utils.LogInfo("Successfully discovered CRDs on retry", map[string]interface{}{
@@ -169,7 +185,6 @@ func main() {
 								})
 								return
 							}
-							
 							if retryCount >= 20 {
 								utils.LogError("Failed to discover CRDs after 20 retries", map[string]interface{}{
 									"message": "Please check if Trivy Operator is installed correctly",
@@ -191,29 +206,42 @@ func main() {
 				}
 			}
 
-			if err := api.SetClusterClient(c.Name, k8sClient); err != nil {
-				utils.LogWarning("Failed to set cluster client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
+			if err := api.SetClusterClient(first.Name, firstClient); err != nil {
+				utils.LogWarning("Failed to set cluster client", map[string]interface{}{"cluster": first.Name, "error": err.Error()})
 			}
-
 			cacheUpdater := api.NewCacheUpdater()
-			if err := k8sClient.StartInformer(c.Name, cacheUpdater); err != nil {
-				utils.LogWarning("Failed to start informer", map[string]interface{}{"cluster": c.Name, "error": err.Error(), "message": "Reports will still be available but won't auto-update via watch"})
+			if err := firstClient.StartInformer(first.Name, cacheUpdater); err != nil {
+				utils.LogWarning("Failed to start informer", map[string]interface{}{"cluster": first.Name, "error": err.Error()})
 			} else {
-				utils.LogInfo("Started informer for cluster", map[string]interface{}{"cluster": c.Name, "message": "Reports will auto-update on changes"})
+				utils.LogInfo("Started informer for cluster", map[string]interface{}{"cluster": first.Name, "message": "Reports will auto-update on changes"})
 			}
 		}
 
+		if len(clustersToInit) > 1 {
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			for _, c := range clustersToInit[1:] {
+				wg.Add(1)
+				go func(cc clusterInfo) {
+					defer wg.Done()
+					if k8sClient := initCluster(cc); k8sClient != nil {
+						mu.Lock()
+						clients[cc.Name] = k8sClient
+						mu.Unlock()
+					}
+				}(c)
+			}
+			wg.Wait()
+		}
+
+		api.SetWarmupCompleted()
+
 		if hasCache {
 			go func() {
-				time.Sleep(10 * time.Second)
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 				defer cancel()
 				api.ValidateAndCleanupCache(ctx)
 			}()
-		}
-
-		if !hasCache {
-			go api.Warmup(context.Background())
 		}
 	}
 

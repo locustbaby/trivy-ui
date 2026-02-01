@@ -106,46 +106,52 @@ func (m *ReportInformerManager) Start() error {
 
 	factory.Start(m.ctx.Done())
 
-	// Use longer timeout for initial sync (5 minutes) as SBOM reports can be very large
-	timeout := 5 * time.Minute
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	syncTimeout := 2 * time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), syncTimeout)
 	defer cancel()
 
-	// Wait for each informer to sync, but don't fail if one times out
-	// This allows the system to start even if some report types are slow to sync
-	syncedCount := 0
+	type syncResult struct {
+		name   string
+		synced bool
+	}
+
+	resultCh := make(chan syncResult, len(m.informers))
+
 	for name, informer := range m.informers {
-		// Use per-informer timeout (2 minutes each)
-		perInformerCtx, perCancel := context.WithTimeout(ctx, 2*time.Minute)
-		if cache.WaitForCacheSync(perInformerCtx.Done(), informer.HasSynced) {
-			items := informer.GetStore().List()
-			utils.LogInfo("Informer synced", map[string]interface{}{
-				"cluster":    m.clusterName,
-				"reportType": name,
-				"count":      len(items),
-			})
+		go func(n string, inf cache.SharedInformer) {
+			ok := cache.WaitForCacheSync(ctx.Done(), inf.HasSynced)
+			if ok {
+				utils.LogInfo("Informer synced", map[string]interface{}{
+					"cluster":    m.clusterName,
+					"reportType": n,
+					"count":      len(inf.GetStore().List()),
+				})
+			} else {
+				utils.LogWarning("Informer sync timeout, will continue in background", map[string]interface{}{
+					"cluster":    m.clusterName,
+					"reportType": n,
+				})
+			}
+			resultCh <- syncResult{name: n, synced: ok}
+		}(name, informer)
+	}
+
+	syncedCount := 0
+	for range m.informers {
+		r := <-resultCh
+		if r.synced {
 			syncedCount++
-		} else {
-			utils.LogWarning("Informer sync timeout, will continue in background", map[string]interface{}{
-				"cluster":    m.clusterName,
-				"reportType": name,
-			})
 		}
-		perCancel()
 	}
 
 	if syncedCount == 0 {
 		return fmt.Errorf("no informers synced successfully")
 	}
 
-	// Load existing resources from synced informers
+	var loadWg sync.WaitGroup
 	for _, reportType := range reports {
 		informer, ok := m.informers[reportType.Name]
-		if !ok {
-			continue
-		}
-		// Only load if informer has synced
-		if !informer.HasSynced() {
+		if !ok || !informer.HasSynced() {
 			continue
 		}
 		items := informer.GetStore().List()
@@ -154,15 +160,20 @@ func (m *ReportInformerManager) Start() error {
 			"reportType": reportType.Name,
 			"count":      len(items),
 		})
-		for _, item := range items {
-			m.onAdd(reportType, item)
-		}
+		loadWg.Add(1)
+		go func(rt config.ReportKind, items []interface{}) {
+			defer loadWg.Done()
+			for _, item := range items {
+				m.onAdd(rt, item)
+			}
+		}(reportType, items)
 	}
+	loadWg.Wait()
 
 	utils.LogInfo("Started informers for report types", map[string]interface{}{
-		"cluster":      m.clusterName,
-		"total":        len(m.informers),
-		"synced":       syncedCount,
+		"cluster": m.clusterName,
+		"total":   len(m.informers),
+		"synced":  syncedCount,
 	})
 	return nil
 }

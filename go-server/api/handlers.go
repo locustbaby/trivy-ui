@@ -64,6 +64,7 @@ type Handler struct {
 type CacheService interface {
 	Get(key string) (interface{}, bool)
 	Items() map[string]interface{}
+	ItemsByType(typeName string) map[string]interface{}
 	Set(key string, value interface{}, expiration time.Duration)
 	Delete(key string)
 }
@@ -84,6 +85,10 @@ func (c *cacheServiceImpl) Set(key string, value interface{}, expiration time.Du
 
 func (c *cacheServiceImpl) Delete(key string) {
 	getCache().Delete(key)
+}
+
+func (c *cacheServiceImpl) ItemsByType(typeName string) map[string]interface{} {
+	return getCache().ItemsByType(typeName)
 }
 
 func (c *cacheServiceImpl) GetStats() map[string]interface{} {
@@ -196,23 +201,27 @@ func (h *Handler) GetTypesV1(w http.ResponseWriter, r *http.Request) {
 
 // ReadinessCheck 检查应用是否就绪
 func (h *Handler) ReadinessCheck(w http.ResponseWriter, r *http.Request) {
+	if !IsWarmupCompleted() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("warmup not completed"))
+		return
+	}
+
 	registry := config.GetGlobalRegistry()
-	
-	// 检查 CRD 是否已发现
+
 	if !registry.IsDiscovered() {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("CRDs not discovered yet"))
 		return
 	}
-	
-	// 检查是否有可用的集群客户端
+
 	clients := GetAllClusterClients()
 	if len(clients) == 0 {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("No cluster clients available"))
 		return
 	}
-	
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ready"))
 }
@@ -429,7 +438,7 @@ func (h *Handler) parseQueryParams(r *http.Request) (clusterFilter string, names
 
 func (h *Handler) getReportsFromCache(typeName, clusterFilter string, namespaceFilters []string) []Report {
 	var reports []Report
-	items := h.cache.Items()
+	items := h.cache.ItemsByType(typeName)
 
 	utils.LogDebug("getReportsFromCache", map[string]interface{}{
 		"typeName":         typeName,
@@ -439,11 +448,8 @@ func (h *Handler) getReportsFromCache(typeName, clusterFilter string, namespaceF
 	})
 
 	for k, v := range items {
-		cluster, namespace, reportType, reportName, ok := h.parseReportKey(k)
+		cluster, namespace, _, reportName, ok := h.parseReportKey(k)
 		if !ok {
-			continue
-		}
-		if reportType != typeName {
 			continue
 		}
 		if clusterFilter != "" && cluster != clusterFilter {
@@ -493,7 +499,7 @@ func (h *Handler) getReportsFromCache(typeName, clusterFilter string, namespaceF
 		}
 
 		if report.Type == "" {
-			report.Type = reportType
+			report.Type = typeName
 		}
 		if report.Cluster == "" {
 			report.Cluster = cluster
@@ -673,15 +679,11 @@ func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typ
 
 	clusterFilter, namespaceFilters, _, _ := h.parseQueryParams(r)
 
-	// First, find the report in summary cache to get cluster/namespace info
 	var cluster, namespace string
-	items := h.cache.Items()
+	items := h.cache.ItemsByType(typeName)
 	for k := range items {
-		c, ns, reportType, reportNameFromKey, ok := h.parseReportKey(k)
-		if !ok {
-			continue
-		}
-		if reportType != typeName || reportNameFromKey != reportName {
+		c, ns, _, reportNameFromKey, ok := h.parseReportKey(k)
+		if !ok || reportNameFromKey != reportName {
 			continue
 		}
 		if clusterFilter != "" && c != clusterFilter {

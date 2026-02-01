@@ -52,6 +52,7 @@ type Cache struct {
 	items      map[string]CacheItem
 	reportKeys map[string]bool
 	keyMap     map[uint64]string
+	typeIndex  map[string]map[string]bool
 }
 
 func InitCache() error {
@@ -66,6 +67,7 @@ func InitCache() error {
 		items:      make(map[string]CacheItem),
 		reportKeys: make(map[string]bool),
 		keyMap:     make(map[uint64]string),
+		typeIndex:  make(map[string]map[string]bool),
 	}
 
 	config := &ristretto.Config{
@@ -79,6 +81,11 @@ func InitCache() error {
 					delete(globalCache.items, keyStr)
 					if strings.HasPrefix(keyStr, "report:") {
 						delete(globalCache.reportKeys, keyStr)
+						if typ := reportTypeFromKey(keyStr); typ != "" {
+							if idx, ok := globalCache.typeIndex[typ]; ok {
+								delete(idx, keyStr)
+							}
+						}
 					}
 					delete(globalCache.keyMap, item.Key)
 				}
@@ -143,16 +150,17 @@ func (c *Cache) Set(key string, value interface{}, expiration time.Duration) {
 	c.cache.SetWithTTL(key, value, cost, expiration)
 	c.mu.Lock()
 	c.keyMap[keyHash] = key
+	c.items[key] = CacheItem{
+		Value:      value,
+		Expiration: time.Now().Add(expiration).Unix(),
+	}
 	if isReport {
-		c.items[key] = CacheItem{
-			Value:      value,
-			Expiration: time.Now().Add(expiration).Unix(),
-		}
 		c.reportKeys[key] = true
-	} else {
-		c.items[key] = CacheItem{
-			Value:      value,
-			Expiration: time.Now().Add(expiration).Unix(),
+		if typ := reportTypeFromKey(key); typ != "" {
+			if c.typeIndex[typ] == nil {
+				c.typeIndex[typ] = make(map[string]bool)
+			}
+			c.typeIndex[typ][key] = true
 		}
 	}
 	c.mu.Unlock()
@@ -166,6 +174,11 @@ func (c *Cache) Delete(key string) {
 	delete(c.keyMap, keyHash)
 	if strings.HasPrefix(key, "report:") {
 		delete(c.reportKeys, key)
+		if typ := reportTypeFromKey(key); typ != "" {
+			if idx, ok := c.typeIndex[typ]; ok {
+				delete(idx, key)
+			}
+		}
 	}
 	c.mu.Unlock()
 }
@@ -219,6 +232,25 @@ func (c *Cache) Items() map[string]interface{} {
 		}
 	}
 
+	return result
+}
+
+func (c *Cache) ItemsByType(typeName string) map[string]interface{} {
+	c.mu.RLock()
+	keys := make([]string, 0)
+	if idx, ok := c.typeIndex[typeName]; ok {
+		for k := range idx {
+			keys = append(keys, k)
+		}
+	}
+	c.mu.RUnlock()
+
+	result := make(map[string]interface{}, len(keys))
+	for _, k := range keys {
+		if val, ok := c.Get(k); ok {
+			result[k] = val
+		}
+	}
 	return result
 }
 
@@ -368,8 +400,12 @@ func (c *Cache) LoadFromFile() error {
 					Expiration: time.Now().Add(expiration).Unix(),
 				}
 				c.reportKeys[k] = true
-
-				// Rebuild counters from loaded reports
+				if typ := reportTypeFromKey(k); typ != "" {
+					if c.typeIndex[typ] == nil {
+						c.typeIndex[typ] = make(map[string]bool)
+					}
+					c.typeIndex[typ][k] = true
+				}
 				c.updateCountersFromReportKey(k, item.Value)
 			} else {
 				c.items[k] = item
@@ -383,8 +419,12 @@ func (c *Cache) LoadFromFile() error {
 					Expiration: time.Now().Add(7 * 24 * time.Hour).Unix(),
 				}
 				c.reportKeys[k] = true
-
-				// Rebuild counters from loaded reports
+				if typ := reportTypeFromKey(k); typ != "" {
+					if c.typeIndex[typ] == nil {
+						c.typeIndex[typ] = make(map[string]bool)
+					}
+					c.typeIndex[typ][k] = true
+				}
 				c.updateCountersFromReportKey(k, val)
 			}
 		}
@@ -459,6 +499,17 @@ func namespaceKey(cluster, ns string) string {
 
 func reportKey(cluster, ns, typ, name string) string {
 	return fmt.Sprintf("report:%s:%s:%s:%s", cluster, ns, typ, name)
+}
+
+func reportTypeFromKey(key string) string {
+	if !strings.HasPrefix(key, "report:") {
+		return ""
+	}
+	parts := strings.SplitN(key[7:], ":", 4)
+	if len(parts) < 3 {
+		return ""
+	}
+	return parts[2]
 }
 
 func (c *Cache) hashKey(key string) uint64 {

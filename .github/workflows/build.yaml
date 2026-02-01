@@ -123,14 +123,25 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Image digest
+        if: steps.check_trivy.outputs.found_vuln == 'false'
         run: echo ${{ steps.docker_build.outputs.digest }}
 
       - name: Inspect image
+        if: steps.check_trivy.outputs.found_vuln == 'false'
         run: |
           docker buildx imagetools inspect ${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}
 
       - name: Summary
         run: |
+          if [[ "${{ steps.check_trivy.outputs.found_vuln }}" == "true" ]]; then
+            echo "### ⚠️ Docker Image NOT Pushed - Vulnerabilities Found" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Trivy scan found CRITICAL/HIGH vulnerabilities. Image was built but not pushed." >> $GITHUB_STEP_SUMMARY
+            echo "- **Tag:** ${{ env.TAG }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Version:** ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
           echo "### Multi-Architecture Docker Image Build Complete 🚀" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
