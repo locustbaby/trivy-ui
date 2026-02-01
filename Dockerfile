@@ -1,5 +1,5 @@
 ARG NODE_VERSION=23.10.0-alpine3.21
-ARG GOLANG_VERSION=1.24.4-bullseye
+ARG GOLANG_VERSION=1.24.4-bookworm
 ARG VERSION
 
 FROM golang:${GOLANG_VERSION} AS build
@@ -22,7 +22,7 @@ WORKDIR /app/trivy-dashboard
 RUN npm install && npm run build
 
 
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 WORKDIR /app
 ARG VERSION
 ENV VERSION=${VERSION}

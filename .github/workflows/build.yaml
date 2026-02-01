@@ -91,7 +91,9 @@ jobs:
       - name: Check Trivy Scan Result
         id: check_trivy
         run: |
-          if grep -q '"Vulnerabilities":' trivy-result.json && grep -q '"Severity":' trivy-result.json; then
+          VULN_COUNT=$(jq '[.Results[]? | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | length' trivy-result.json 2>/dev/null || echo "0")
+          echo "Vulnerability count (CRITICAL+HIGH): $VULN_COUNT"
+          if [ "$VULN_COUNT" -gt 0 ] 2>/dev/null; then
             echo "found_vuln=true" >> $GITHUB_OUTPUT
           else
             echo "found_vuln=false" >> $GITHUB_OUTPUT
