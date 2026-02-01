@@ -79,7 +79,13 @@ func (m *ReportInformerManager) Start() error {
 
 		informer := factory.ForResource(gvr).Informer()
 
-		// Add event handlers with error recovery logging
+		if err := informer.SetTransform(stripLargeFields); err != nil {
+			utils.LogWarning("Failed to set transform on informer", map[string]interface{}{
+				"reportType": reportType.Name,
+				"error":      err.Error(),
+			})
+		}
+
 		informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				m.onAdd(reportType, obj)
@@ -199,6 +205,25 @@ func (m *ReportInformerManager) GetAllInformers() map[string]cache.SharedInforme
 		result[k] = v
 	}
 	return result
+}
+
+func stripLargeFields(obj interface{}) (interface{}, error) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return obj, nil
+	}
+
+	if reportObj, hasReport := u.Object["report"].(map[string]interface{}); hasReport {
+		stripped := make(map[string]interface{})
+		for _, key := range []string{"summary", "artifact", "scanner", "registry", "updateTimestamp"} {
+			if v, exists := reportObj[key]; exists {
+				stripped[key] = v
+			}
+		}
+		u.Object["report"] = stripped
+	}
+
+	return u, nil
 }
 
 func (m *ReportInformerManager) onAdd(reportType config.ReportKind, obj interface{}) {
