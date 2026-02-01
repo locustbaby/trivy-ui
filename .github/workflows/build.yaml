@@ -43,7 +43,9 @@ jobs:
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
           elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
             BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's|refs/heads/||')
-            TAG_NAME="${BRANCH_NAME}-latest"
+            TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
             TAG_NAME=$(echo "${{ github.ref }}" | sed 's|refs/tags/||')
           else
