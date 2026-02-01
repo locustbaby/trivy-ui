@@ -98,6 +98,8 @@ jobs:
           echo "Vulnerability count (CRITICAL+HIGH): $VULN_COUNT"
           if [ "$VULN_COUNT" -gt 0 ] 2>/dev/null; then
             echo "found_vuln=true" >> $GITHUB_OUTPUT
+            echo "::error::Found $VULN_COUNT CRITICAL/HIGH vulnerabilities. Failing build."
+            exit 1
           else
             echo "found_vuln=false" >> $GITHUB_OUTPUT
           fi
@@ -115,7 +117,6 @@ jobs:
 
       - name: Build and Push Multi-Architecture Docker Image
         id: docker_build
-        if: steps.check_trivy.outputs.found_vuln == 'false'
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -128,25 +129,14 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Image digest
-        if: steps.check_trivy.outputs.found_vuln == 'false'
         run: echo ${{ steps.docker_build.outputs.digest }}
 
       - name: Inspect image
-        if: steps.check_trivy.outputs.found_vuln == 'false'
         run: |
           docker buildx imagetools inspect ${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}
 
       - name: Summary
         run: |
-          if [[ "${{ steps.check_trivy.outputs.found_vuln }}" == "true" ]]; then
-            echo "### ⚠️ Docker Image NOT Pushed - Vulnerabilities Found" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Trivy scan found CRITICAL/HIGH vulnerabilities. Image was built but not pushed." >> $GITHUB_STEP_SUMMARY
-            echo "- **Tag:** ${{ env.TAG }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Version:** ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
           echo "### Multi-Architecture Docker Image Build Complete 🚀" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
