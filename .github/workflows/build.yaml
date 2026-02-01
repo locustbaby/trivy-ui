@@ -91,6 +91,9 @@ jobs:
       - name: Check Trivy Scan Result
         id: check_trivy
         run: |
+          echo "=== Trivy Scan Summary ==="
+          jq -r '.Results[]? | select(.Vulnerabilities != null) | .Target as $target | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | "\(.Severity)\t\(.VulnerabilityID)\t\($target)\t\(.PkgName)\t\(.InstalledVersion)"' trivy-result.json 2>/dev/null | head -50 || true
+          echo "========================="
           VULN_COUNT=$(jq '[.Results[]? | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | length' trivy-result.json 2>/dev/null || echo "0")
           echo "Vulnerability count (CRITICAL+HIGH): $VULN_COUNT"
           if [ "$VULN_COUNT" -gt 0 ] 2>/dev/null; then
