@@ -144,7 +144,7 @@ jobs:
             echo "Trivy scan found CRITICAL/HIGH vulnerabilities. Image was built but not pushed." >> $GITHUB_STEP_SUMMARY
             echo "- **Tag:** ${{ env.TAG }}" >> $GITHUB_STEP_SUMMARY
             echo "- **Version:** ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
-            exit 0
+            exit 1
           fi
 
           echo "### Multi-Architecture Docker Image Build Complete 🚀" >> $GITHUB_STEP_SUMMARY
