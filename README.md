@@ -15,22 +15,18 @@ Trivy UI provides a centralized dashboard for viewing vulnerability reports gene
 ![Report Details](./trivy-dashboard/public/report-details.png)
 *In-depth view of individual vulnerability reports*
 
-*Currently supports vulnerability reports view, other report types will fallback to JSON format*
-
 ---
 
 ## Quick Start with Docker Image
 
-You can quickly run Trivy UI using the official Docker image:
-
 ```shell
-docker pull locustbaby/trivy-ui:v0.0.2
+docker pull locustbaby/trivy-ui:v0.0.3
 
 docker run -d \
   -v /path/to/your/kubeconfigs:/kubeconfigs \
   -e KUBECONFIG_DIR=/kubeconfigs \
   -p 8080:8080 \
-  locustbaby/trivy-ui:v0.0.2
+  locustbaby/trivy-ui:v0.0.3
 ```
 - Replace `/path/to/your/kubeconfigs` with the directory containing your kubeconfig files (one per cluster).
 - Access the dashboard at http://localhost:8080
@@ -41,10 +37,8 @@ docker run -d \
 
 ### Using Helm Chart (Recommended)
 
-1. **Install the Helm chart:**
-
 ```bash
-# Install directly from Docker Hub (Recommended)
+# Install directly from Docker Hub OCI registry
 helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui
 
 # Or from GitHub Pages
@@ -58,192 +52,119 @@ cd trivy-ui/charts/trivy-ui
 helm install my-trivy-ui .
 ```
 
-2. **Configure kubeconfigs for multi-cluster support:**
+### Configure kubeconfigs for multi-cluster support
 
 ```bash
-# Create a secret with your kubeconfig files
 kubectl create secret generic kubeconfigs \
   --from-file=cluster1=/path/to/cluster1-kubeconfig \
   --from-file=cluster2=/path/to/cluster2-kubeconfig
 ```
 
-3. **Customize the deployment (optional):**
+### Customize the deployment
 
 ```bash
-# Install with custom values
-helm install my-trivy-ui . \
+helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui \
   --set ingress.enabled=true \
-  --set ingress.hosts[0].host=trivy-ui.example.com \
-  --set resources.limits.memory=256Mi
+  --set ingress.hosts[0].host=trivy-ui.example.com
 ```
-
-### Alternative: Using Helm Charts
-
-For easier deployment and management, we recommend using our Helm charts:
-
-```bash
-# Clone the repository
-git clone https://github.com/locustbaby/trivy-ui.git
-cd trivy-ui/charts/trivy-ui
-
-# Create kubeconfig secret first
-kubectl create secret generic kubeconfigs \
-  --from-file=cluster1=/path/to/cluster1-kubeconfig \
-  --from-file=cluster2=/path/to/cluster2-kubeconfig
-
-# Install with Helm
-helm install my-trivy-ui . \
-  --set kubeconfigs.create=false \
-  --set kubeconfigs.secretName=kubeconfigs
-
-# Or install with custom values
-helm install my-trivy-ui . \
-  --set ingress.enabled=true \
-  --set ingress.hosts[0].host=trivy-ui.example.com \
-  --set resources.limits.memory=256Mi
-```
-
-**Benefits of using Helm:**
-- **Simplified deployment** - One command to install all components
-- **Easy customization** - Configure via values.yaml or command line
-- **Version management** - Easy upgrades and rollbacks
-- **Production ready** - Includes RBAC, health checks, and resource limits
-- **Multi-environment support** - Different configurations for dev/staging/prod
 
 For detailed Helm chart documentation, see [charts/trivy-ui/README.md](charts/trivy-ui/README.md).
 
 ---
 
 ## Features
-- **Multi-Cluster Support**: Manage and view reports from multiple Kubernetes clusters by mounting a directory of kubeconfig files
-- **Dashboard View**: Overview of vulnerability statistics across namespaces and clusters
-- **Detailed Reports**: In-depth analysis of vulnerabilities by severity
-- **Search & Filter**: Quickly locate specific vulnerability reports
-- **Caching**: Optimized performance with disk-persistent caching
-- **Responsive Design**: Works on desktop and mobile devices
-- **Real-time Updates**: Automatic refresh of vulnerability data
-- **Export Capabilities**: Download reports in various formats
+- **Multi-Cluster Support**: View reports from multiple Kubernetes clusters via kubeconfig directory
+- **All Trivy CRD Types**: Auto-discovers all Trivy Operator CRDs (VulnerabilityReport, ConfigAuditReport, SbomReport, ExposedSecretReport, RbacAssessmentReport, InfraAssessmentReport, and their cluster-scoped variants)
+- **Server-Side Pagination**: Efficient handling of large clusters with hundreds of reports
+- **Search & Filter**: Filter by cluster, namespace, and search by report name
+- **Detail View**: Full vulnerability/check details fetched on-demand
+- **Disk-Persistent Cache**: Fast startup with cached data, background K8s sync
+- **Real-time Updates**: Kubernetes informer-based watch for live report changes
+- **Memory Optimized**: SetTransform strips large fields from informer store, detail data fetched on-demand
+- **Responsive Design**: Works on desktop and mobile
 
 ## Architecture
-The application consists of two main components:
 
-- **Frontend**: Vue 3 single-page application with Vite
-- **Backend**: Go server that interfaces with the Kubernetes API (multi-cluster via kubeconfig directory)
+- **Frontend**: React 19 + TypeScript + Vite + Tailwind CSS
+- **Backend**: Go with Kubernetes dynamic client, informer-based caching
 
 ```
 trivy-ui/
-├── go-server/         # Go backend application
-│   ├── api/           # API handlers and routes
-│   ├── config/        # Configuration management
-│   ├── kubernetes/    # Kubernetes client interface
-│   └── main.go        # Application entry point
-├── trivy-dashboard/   # Vue 3 frontend
-│   ├── src/           # Frontend source code
-│   ├── public/        # Static assets
-│   └── dist/          # Built frontend files
-└── charts/            # Helm charts for deployment
-    └── trivy-ui/      # Kubernetes deployment chart
+├── go-server/         # Go backend
+│   ├── api/           # REST handlers, cache, cluster client
+│   ├── config/        # CRD registry, app config
+│   ├── kubernetes/    # K8s client, informer with SetTransform
+│   └── main.go        # Entry point
+├── trivy-dashboard/   # React frontend
+│   └── src/
+│       ├── api/       # API client
+│       ├── components/# UI components
+│       └── pages/     # Route pages
+├── charts/            # Helm chart
+│   └── trivy-ui/
+└── Dockerfile         # Multi-stage build
 ```
 
 ### Data Flow
-1. **Backend** loads kubeconfig files from mounted directory
-2. **Backend** connects to multiple Kubernetes clusters
-3. **Backend** queries Trivy Operator CRDs for vulnerability reports
-4. **Frontend** requests data via REST API
-5. **Frontend** renders interactive dashboard with vulnerability data
+1. Backend discovers Trivy Operator CRDs via K8s API
+2. Informers watch all report types with SetTransform (stores only summary data in memory)
+3. List API serves paginated results from in-memory cache
+4. Detail API fetches full report from K8s on-demand, caches with 5-10min TTL
+5. Disk cache enables fast pod restarts without re-listing all resources
 
 ## Prerequisites
-- Go 1.24+
-- Node.js 16+
+- Go 1.25+
+- Node.js 23+
 - Access to one or more Kubernetes clusters with Trivy Operator installed
-- Each cluster's kubeconfig file (see below)
 
-## Installation
+## Development Setup
 
-### Build from Source
-1. **Clone the repository**
-```shell
-git clone https://github.com/locustbaby/trivy-ui.git
-cd trivy-ui
-```
-
-2. **Build and run the frontend**
-```shell
-cd trivy-dashboard
-npm install
-npm run build
-```
-
-3. **Build and run the backend server**
-```shell
-cd ../go-server
-go mod download
-go build
-./go-server
-```
-
-4. **Access the dashboard at http://localhost:8080**
-
-### Development Setup
-
-#### Backend Development
-```shell
-cd go-server
-go run main.go
-```
-
-#### Frontend Development
-```shell
-cd trivy-dashboard
-npm install
-npm run dev
-```
-
-#### Full Stack Development
 ```shell
 # Terminal 1: Backend
 cd go-server && go run main.go
 
-# Terminal 2: Frontend
-cd trivy-dashboard && npm run dev
+# Terminal 2: Frontend (proxies API to localhost:8080)
+cd trivy-dashboard && npm install && npm run dev
 ```
+
+Access the frontend dev server at http://localhost:5173
 
 ## Configuration
 
 ### Environment Variables
-The server can be configured using the following environment variables:
 
-| Variable         | Description                                 | Default           |
-|------------------|---------------------------------------------|-------------------|
-| `PORT`           | HTTP port to listen on                      | `8080`            |
-| `DEBUG`          | Enable debug logging                        | `false`           |
-| `STATIC_PATH`    | Path to static frontend assets              | `../trivy-dashboard/dist` |
-| `KUBECONFIG_DIR` | Directory containing kubeconfig files       | `/kubeconfigs`    |
-
-### Multi-Cluster Configuration
-
-1. **Prepare kubeconfig files:**
-   - Each file should contain a single cluster's kubeconfig
-   - Files should be named descriptively (e.g., `prod-cluster`, `staging-cluster`)
-
-2. **Mount kubeconfig directory:**
-   - Docker: `-v /path/to/kubeconfigs:/kubeconfigs`
-   - Kubernetes: Mount as Secret or ConfigMap
-
-3. **Verify cluster connectivity:**
-   ```bash
-   # Check if clusters are detected
-   curl http://localhost:8080/api/clusters
-   ```
+| Variable         | Description                           | Default              |
+|------------------|---------------------------------------|----------------------|
+| `PORT`           | HTTP port                             | `8080`               |
+| `DEBUG`          | Enable debug logging                  | `false`              |
+| `STATIC_PATH`    | Path to frontend assets               | `trivy-dashboard/dist` |
+| `KUBECONFIG_DIR` | Directory containing kubeconfig files | `/kubeconfigs`       |
+| `DATA_PATH`      | Directory for cache persistence       | `/cache`             |
 
 ## API Reference
 
-### Endpoints
+### V1 Endpoints
 
-#### Clusters
-- `GET /api/clusters` - List all available clusters
-- `GET /api/clusters/{cluster}/namespaces` - List namespaces in a cluster
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/type` | List all discovered report types |
+| `GET` | `/api/v1/type/{type}` | List reports by type (paginated) |
+| `GET` | `/api/v1/type/{type}/{name}` | Get full report details |
+| `GET` | `/api/clusters` | List all clusters |
+| `GET` | `/api/clusters/{cluster}/namespaces` | List namespaces |
+| `GET` | `/api/cache/stats` | Cache statistics |
+| `GET` | `/healthz` | Health check |
+| `GET` | `/readyz` | Readiness check |
 
-#### Reports
-- `GET /api/reports/{type}/{cluster}/{namespace}` - Get reports by type, cluster, and namespace
-- `
+### Query Parameters for list endpoint
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `cluster` | Filter by cluster | `?cluster=prod` |
+| `namespace` | Filter by namespace (comma-separated) | `?namespace=default,kube-system` |
+| `page` | Page number | `?page=2` |
+| `pageSize` | Items per page (max 200) | `?pageSize=50` |
+
+## License
+
+MIT
