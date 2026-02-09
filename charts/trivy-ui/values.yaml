@@ -8,7 +8,7 @@ image:
   repository: locustbaby/trivy-ui
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "v0.0.2"
+  tag: "v0.0.3"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -59,10 +59,10 @@ ingress:
 resources:
   limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 2Gi
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 256Mi
 
 autoscaling:
   enabled: false
