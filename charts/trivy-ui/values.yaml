@@ -39,6 +39,7 @@ securityContext: {}
 service:
   type: ClusterIP
   port: 80
+  loadBalancerIP: ""
 
 ingress:
   enabled: false
