@@ -17,6 +17,7 @@ export interface SidebarProps {
   reportCounts?: Record<string, number>
   selectedCluster?: string
   selectedType?: string
+  isSingleClusterMode?: boolean
   onSelectCluster?: (cluster: string) => void
   onSelectType?: (type: string) => void
 }
@@ -27,6 +28,7 @@ export function Sidebar({
   reportCounts = {},
   selectedCluster,
   selectedType,
+  isSingleClusterMode = false,
   onSelectCluster,
   onSelectType,
 }: SidebarProps) {
@@ -71,18 +73,43 @@ export function Sidebar({
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  const clusterOptions = clusters.map((c) => ({ value: c.name, label: c.name }))
+  const clusterOptions = clusters.length > 1 
+    ? [
+        { value: "all", label: "🌐 All Clusters" },
+        ...clusters.map((c) => ({ value: c.name, label: c.name }))
+      ]
+    : clusters.map((c) => ({ value: c.name, label: c.name }))
 
   const reportTypeOptions = reportTypes.map((t) => ({
     value: t.name,
     label: formatTypeName(t.kind || t.name),
   }))
 
+  const currentClusterObj = clusters.find((c) => c.name === selectedCluster)
+  const syncState = currentClusterObj?.syncState || "Cached"
+
+  const syncStateConfig = {
+    FullySynced: { color: "bg-green-500", text: "Fully Synced" },
+    Syncing: { color: "bg-blue-500 animate-pulse", text: "Syncing..." },
+    SyncFailed: { color: "bg-red-500 animate-pulse", text: "Sync Failed" },
+    Cached: { color: "bg-gray-400", text: "Cached Snapshot" },
+  }[syncState as "FullySynced" | "Syncing" | "SyncFailed" | "Cached"] || { color: "bg-gray-400", text: "Cached" }
+
   const sidebarContent = (
     <>
       {/* Logo Section */}
       <div className="flex h-20 items-center justify-between border-b px-4 md:px-6 bg-gradient-to-r from-primary/10 to-purple-500/10">
-        <div className="flex items-center gap-3">
+        <button 
+          onClick={() => {
+            onSelectType?.("")
+            setIsMobileOpen(false)
+          }}
+          className={cn(
+            "flex items-center gap-3 transition-opacity text-left rounded-xl outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+            !selectedType ? "opacity-100" : "hover:opacity-80"
+          )}
+          title="Go to Overview"
+        >
           <div className="p-2 rounded-xl bg-gradient-to-br from-primary to-purple-600 shadow-lg shadow-primary/25">
             <Shield className="h-6 w-6 text-white" />
           </div>
@@ -94,7 +121,7 @@ export function Sidebar({
               <p className="text-[10px] text-muted-foreground font-medium">Security Dashboard</p>
             </div>
           )}
-        </div>
+        </button>
         <div className="flex items-center gap-1">
           <button
             onClick={() => setIsDark(!isDark)}
@@ -127,29 +154,33 @@ export function Sidebar({
 
       <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-6 scrollbar-thin">
         {/* Cluster Selection */}
-        <div>
-          <label className={cn(
-            "mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider",
-            isCollapsed && "justify-center"
-          )}>
-            <Server className="h-3.5 w-3.5" />
-            {!isCollapsed && "Cluster"}
-          </label>
-          {isCollapsed ? (
-            <div className="flex justify-center">
-              <div className="p-2 rounded-lg bg-muted" title={selectedCluster || "Select cluster"}>
-                <Server className="h-4 w-4" />
+        {!isSingleClusterMode && (
+          <div>
+            <label className={cn(
+              "mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider",
+              isCollapsed && "justify-center"
+            )}>
+              <Server className="h-3.5 w-3.5" />
+              {!isCollapsed && "Cluster"}
+            </label>
+            {isCollapsed ? (
+              <div className="flex justify-center">
+                <div className="p-2 rounded-lg bg-muted" title={selectedCluster || "Select cluster"}>
+                  <Server className="h-4 w-4" />
+                </div>
               </div>
-            </div>
-          ) : (
-            <Combobox
-              options={clusterOptions}
-              value={selectedCluster}
-              onValueChange={onSelectCluster}
-              placeholder="Select cluster..."
-            />
-          )}
-        </div>
+            ) : (
+              <Combobox
+                options={clusterOptions}
+                value={selectedCluster}
+                onValueChange={onSelectCluster}
+                placeholder="Select cluster..."
+              />
+            )}
+          </div>
+        )}
+
+
 
         {/* Report Type Selection */}
         <div>
@@ -245,11 +276,11 @@ export function Sidebar({
           "flex items-center gap-3 text-xs text-muted-foreground",
           isCollapsed && "justify-center"
         )}>
-          <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-            {!isCollapsed && <span>Connected</span>}
+          <div className="flex items-center gap-1.5" title={`${syncStateConfig.text}${selectedCluster ? ` (${selectedCluster})` : ""}`}>
+            <span className={cn("w-2 h-2 rounded-full", syncStateConfig.color)} />
+            {!isCollapsed && <span>{syncStateConfig.text}</span>}
           </div>
-          {!isCollapsed && (
+          {!isCollapsed && !isSingleClusterMode && (
             <>
               <span className="text-muted-foreground/40">•</span>
               <span>{clusters.length} clusters</span>

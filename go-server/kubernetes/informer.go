@@ -19,9 +19,11 @@ import (
 type CacheUpdater interface {
 	SetReport(cluster, namespace, reportType, name string, report *Report)
 	DeleteReport(cluster, namespace, reportType, name string)
+	InvalidateReportDetail(cluster, namespace, reportType, name string)
 	IncrementCount(cluster, namespace, reportType string, hasVuln bool)
 	DecrementCount(cluster, namespace, reportType string, hasVuln bool)
 	AdjustVulnCount(cluster, namespace, reportType string, delta int)
+	UpdateSyncState(clusterName string, state string)
 }
 
 type ReportInformerManager struct {
@@ -56,6 +58,10 @@ func (m *ReportInformerManager) Start() error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.cacheUpdater != nil {
+		m.cacheUpdater.UpdateSyncState(m.clusterName, "Syncing")
+	}
 
 	// Use a reasonable resync period to recover from missed events
 	// 10 minutes is a good balance between freshness and API load
@@ -151,7 +157,18 @@ func (m *ReportInformerManager) Start() error {
 	}
 
 	if syncedCount == 0 {
+		if m.cacheUpdater != nil {
+			m.cacheUpdater.UpdateSyncState(m.clusterName, "SyncFailed")
+		}
 		return fmt.Errorf("no informers synced successfully")
+	} else if syncedCount < len(m.informers) {
+		if m.cacheUpdater != nil {
+			m.cacheUpdater.UpdateSyncState(m.clusterName, "Syncing")
+		}
+	} else {
+		if m.cacheUpdater != nil {
+			m.cacheUpdater.UpdateSyncState(m.clusterName, "FullySynced")
+		}
 	}
 
 	var loadWg sync.WaitGroup
@@ -249,6 +266,7 @@ func (m *ReportInformerManager) onUpdate(reportType config.ReportKind, oldObj, n
 	report := m.convertToReport(reportType, newUnstructured)
 	if report != nil && m.cacheUpdater != nil {
 		m.cacheUpdater.SetReport(m.clusterName, report.Namespace, report.Type, report.Name, report)
+		m.cacheUpdater.InvalidateReportDetail(m.clusterName, report.Namespace, report.Type, report.Name)
 
 		// Check if vulnerability status changed and adjust counters
 		oldHasVuln := m.hasVulnerabilities(oldUnstructured.Object)
@@ -273,11 +291,7 @@ func (m *ReportInformerManager) onDelete(reportType config.ReportKind, obj inter
 	namespace := unstructuredObj.GetNamespace()
 	name := unstructuredObj.GetName()
 	if m.cacheUpdater != nil {
-		// Get vulnerability status before deleting
-		hasVuln := m.hasVulnerabilities(unstructuredObj.Object)
 		m.cacheUpdater.DeleteReport(m.clusterName, namespace, reportType.Name, name)
-		// Update counters
-		m.cacheUpdater.DecrementCount(m.clusterName, namespace, reportType.Name, hasVuln)
 	}
 }
 

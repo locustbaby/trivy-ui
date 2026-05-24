@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	clusterClients   = make(map[string]*ClusterClient)
-	clusterClientsMu sync.RWMutex
+	defaultRegistry *ClusterRegistry
+	registryOnce    sync.Once
 )
 
 type ClusterClient struct {
@@ -21,26 +21,59 @@ type ClusterClient struct {
 	APIServerURL string
 	Version      string
 	Namespaces   []string
+	SyncState    string
 	mu           sync.RWMutex
 }
 
+type ClusterRegistry struct {
+	mu       sync.RWMutex
+	clients  map[string]*ClusterClient
+	cacheSvc CacheService
+}
+
+func NewClusterRegistry(cacheSvc CacheService) *ClusterRegistry {
+	return &ClusterRegistry{
+		clients:  make(map[string]*ClusterClient),
+		cacheSvc: cacheSvc,
+	}
+}
+
+func GetDefaultRegistry() *ClusterRegistry {
+	registryOnce.Do(func() {
+		defaultRegistry = NewClusterRegistry(NewCacheServiceImpl())
+	})
+	return defaultRegistry
+}
+
 func GetClusterClient(clusterName string) *ClusterClient {
-	clusterClientsMu.RLock()
-	defer clusterClientsMu.RUnlock()
-	return clusterClients[clusterName]
+	return GetDefaultRegistry().Get(clusterName)
 }
 
 func GetAllClusterClients() map[string]*ClusterClient {
-	clusterClientsMu.RLock()
-	defer clusterClientsMu.RUnlock()
+	return GetDefaultRegistry().All()
+}
+
+func SetClusterClient(clusterName string, client *kubernetes.Client) error {
+	return GetDefaultRegistry().Set(clusterName, client)
+}
+
+func (r *ClusterRegistry) Get(clusterName string) *ClusterClient {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.clients[clusterName]
+}
+
+func (r *ClusterRegistry) All() map[string]*ClusterClient {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	result := make(map[string]*ClusterClient)
-	for k, v := range clusterClients {
+	for k, v := range r.clients {
 		result[k] = v
 	}
 	return result
 }
 
-func SetClusterClient(clusterName string, client *kubernetes.Client) error {
+func (r *ClusterRegistry) Set(clusterName string, client *kubernetes.Client) error {
 	apiServerURL := ""
 	if restConfig := client.Config(); restConfig != nil {
 		apiServerURL = restConfig.Host
@@ -50,53 +83,48 @@ func SetClusterClient(clusterName string, client *kubernetes.Client) error {
 		version = versionInfo.GitVersion
 	}
 	
-	// Try to get namespaces from K8s API with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	namespaces, err := client.GetNamespaces(ctx)
 	cancel()
 	
-	// If failed, try to recover from cache
 	if err != nil || len(namespaces) == 0 {
-		namespaces = recoverNamespacesFromCache(clusterName)
+		namespaces = r.recoverNamespaces(clusterName)
 	}
 
-	clusterClientsMu.Lock()
-	defer clusterClientsMu.Unlock()
-
-	clusterClients[clusterName] = &ClusterClient{
+	r.mu.Lock()
+	r.clients[clusterName] = &ClusterClient{
 		Name:         clusterName,
 		Client:       client,
 		APIServerURL: apiServerURL,
 		Version:      version,
 		Namespaces:   namespaces,
 	}
+	r.mu.Unlock()
 
 	clusterInfo := Cluster{
 		Name:        clusterName,
 		Description: fmt.Sprintf("API Server: %s, version: %s", apiServerURL, version),
 	}
-	UpsertClusterToCache(clusterInfo)
-
-	// Always update cache with namespaces (even if recovered from cache)
-	for _, ns := range namespaces {
-		nsObj := Namespace{Cluster: clusterName, Name: ns}
-		UpsertNamespaceToCache(nsObj)
+	if r.cacheSvc != nil {
+		r.cacheSvc.Set(clusterKey(clusterName), clusterInfo, 0)
+		for _, ns := range namespaces {
+			nsObj := Namespace{Cluster: clusterName, Name: ns}
+			r.cacheSvc.Set(namespaceKey(clusterName, ns), nsObj, 0)
+		}
 	}
 
 	return nil
 }
 
-// recoverNamespacesFromCache tries to recover namespace list from cache
-func recoverNamespacesFromCache(clusterName string) []string {
-	cache := GetCache()
-	if cache == nil {
+func (r *ClusterRegistry) recoverNamespaces(clusterName string) []string {
+	if r.cacheSvc == nil {
 		return nil
 	}
 	
 	var namespaces []string
-	namespaceSet := make(map[string]bool) // Use set to avoid duplicates
+	namespaceSet := make(map[string]bool)
 	
-	items := cache.Items()
+	items := r.cacheSvc.Items()
 	for k, v := range items {
 		if !strings.HasPrefix(k, "namespace:") {
 			continue
@@ -107,11 +135,9 @@ func recoverNamespacesFromCache(clusterName string) []string {
 		case Namespace:
 			ns = val
 		case CacheItem:
-			// Try to extract Namespace from CacheItem.Value
 			if nsVal, ok := val.Value.(Namespace); ok {
 				ns = nsVal
 			} else if nsMap, ok := val.Value.(map[string]interface{}); ok {
-				// Handle map format
 				if cluster, ok := nsMap["cluster"].(string); ok && cluster == clusterName {
 					if name, ok := nsMap["name"].(string); ok && name != "" {
 						if !namespaceSet[name] {
@@ -125,7 +151,6 @@ func recoverNamespacesFromCache(clusterName string) []string {
 				continue
 			}
 		case map[string]interface{}:
-			// Handle direct map format
 			if cluster, ok := val["cluster"].(string); ok && cluster == clusterName {
 				if name, ok := val["name"].(string); ok && name != "" {
 					if !namespaceSet[name] {
@@ -139,7 +164,6 @@ func recoverNamespacesFromCache(clusterName string) []string {
 			continue
 		}
 		
-		// Handle Namespace struct format
 		if ns.Cluster == clusterName && ns.Name != "" {
 			if !namespaceSet[ns.Name] {
 				namespaces = append(namespaces, ns.Name)
