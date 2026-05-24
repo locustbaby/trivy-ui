@@ -38,11 +38,13 @@ jobs:
           # First, determine the Docker tag
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             BRANCH_NAME="${{ github.head_ref }}"
+            BRANCH_NAME=$(echo "${BRANCH_NAME}" | sed 's|/|-|g')
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
           elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
             BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's|refs/heads/||')
+            BRANCH_NAME=$(echo "${BRANCH_NAME}" | sed 's|/|-|g')
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
