@@ -1,0 +1,30 @@
+[
+  {
+    "timestamp": "2026-05-24T08:22:33.778663+08:00",
+    "cluster": "",
+    "critical": 0,
+    "high": 0,
+    "medium": 0
+  },
+  {
+    "timestamp": "2026-05-24T08:22:33.779534+08:00",
+    "cluster": "",
+    "critical": 0,
+    "high": 0,
+    "medium": 0
+  },
+  {
+    "timestamp": "2026-05-24T08:23:01.88265+08:00",
+    "cluster": "",
+    "critical": 0,
+    "high": 0,
+    "medium": 0
+  },
+  {
+    "timestamp": "2026-05-24T08:23:01.883045+08:00",
+    "cluster": "",
+    "critical": 0,
+    "high": 0,
+    "medium": 0
+  }
+]

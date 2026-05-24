@@ -14,7 +14,6 @@ type ReportQuery struct {
 	OnlyVulnerable bool
 	Page           int
 	PageSize       int
-	Sort           string
 }
 
 type QueryResult struct {

@@ -30,10 +30,21 @@ func incrementTypeVersion(reportType string) {
 	if val, ok := typeVersions.Load(reportType); ok {
 		if num, ok := val.(uint64); ok {
 			typeVersions.Store(reportType, num+1)
-			return
 		}
+	} else {
+		typeVersions.Store(reportType, uint64(1))
 	}
-	typeVersions.Store(reportType, uint64(1))
+	evictQueryCacheForType(reportType)
+}
+
+func evictQueryCacheForType(reportType string) {
+	prefix := reportType + "|"
+	queryResultCache.Range(func(key, _ any) bool {
+		if k, ok := key.(string); ok && len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			queryResultCache.Delete(k)
+		}
+		return true
+	})
 }
 
 func getTypeVersion(reportType string) uint64 {
