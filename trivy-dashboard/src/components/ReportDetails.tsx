@@ -7,11 +7,14 @@ import { SummaryCard } from "./reports/SummaryCard"
 import { VulnerabilitySection } from "./reports/VulnerabilitySection"
 import { ChecksSection } from "./reports/ChecksSection"
 
+const DETAIL_REFRESH_INTERVAL = 15000
+
 interface ReportDetailsProps {
   typeName: string
   reportName: string
   cluster?: string
   namespace?: string
+  isSingleClusterMode?: boolean
   onClose: () => void
   shareUrl?: string
 }
@@ -26,8 +29,9 @@ function formatTypeName(name: string): string {
 export function ReportDetails({
   typeName,
   reportName,
-  cluster: _cluster,
-  namespace: _namespace,
+  cluster,
+  namespace,
+  isSingleClusterMode = false,
   onClose,
   shareUrl,
 }: ReportDetailsProps) {
@@ -36,48 +40,78 @@ export function ReportDetails({
   const [error, setError] = useState<string>()
   const [copied, setCopied] = useState(false)
 
-  // Retry handler
-  const handleRetry = useCallback(() => {
+  const loadReport = useCallback((showLoading: boolean, replaceReport: boolean = false, signal?: AbortSignal) => {
     setError(undefined)
-    setLoading(true)
+    if (showLoading) {
+      setLoading(true)
+    }
+    if (replaceReport) {
+      setReport(null)
+    }
 
-    const controller = new AbortController()
-    api.getReportDetails(typeName, reportName, controller.signal)
+    api.getReportDetails(cluster || "", namespace || "", typeName, reportName, signal)
       .then((data) => {
         setReport(data)
         setLoading(false)
       })
       .catch((err) => {
         if (err instanceof Error && err.name === "AbortError") return
-        setError(err instanceof Error ? err.message : "Failed to fetch report details")
+        if (showLoading) {
+          setError(err instanceof Error ? err.message : "Failed to fetch report details")
+        }
         setLoading(false)
       })
-  }, [typeName, reportName])
+  }, [cluster, namespace, typeName, reportName])
+
+  const handleRetry = useCallback(() => {
+    const controller = new AbortController()
+    loadReport(true, false, controller.signal)
+  }, [loadReport])
 
   useEffect(() => {
     const controller = new AbortController()
-
-    // Reset state for new report
-    setReport(null)
-    setError(undefined)
-    setLoading(true)
-
-    api.getReportDetails(typeName, reportName, controller.signal)
-      .then((data) => {
-        setReport(data)
-        setLoading(false)
-      })
-      .catch((err) => {
-        // Ignore abort errors (happens in StrictMode cleanup)
-        if (err instanceof Error && err.name === "AbortError") return
-        setError(err instanceof Error ? err.message : "Failed to fetch report details")
-        setLoading(false)
-      })
+    loadReport(true, true, controller.signal)
 
     return () => {
       controller.abort()
     }
-  }, [typeName, reportName])
+  }, [loadReport])
+
+  useEffect(() => {
+    const refresh = () => {
+      const controller = new AbortController()
+      loadReport(false, false, controller.signal)
+      return controller
+    }
+
+    let controller: AbortController | null = null
+    const runRefresh = () => {
+      controller?.abort()
+      controller = refresh()
+    }
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        runRefresh()
+      }
+    }, DETAIL_REFRESH_INTERVAL)
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        runRefresh()
+      }
+    }
+
+    window.addEventListener("focus", runRefresh)
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    return () => {
+      controller?.abort()
+      window.clearInterval(timer)
+      window.removeEventListener("focus", runRefresh)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+    }
+  }, [loadReport])
 
   // Handle ESC key to close
   useEffect(() => {
@@ -258,6 +292,7 @@ export function ReportDetails({
                 artifact={artifact}
                 scanner={scanner}
                 hasVulnerabilitiesType={hasVulnerabilitiesType}
+                isSingleClusterMode={isSingleClusterMode}
               />
 
               {summary && <SummaryCard summary={summary} />}

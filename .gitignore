@@ -26,3 +26,11 @@ dist-ssr
 *.db
 */cache.json
 .cursorignore
+
+# Go compiled binaries
+go-server/bin/
+go-server/trivy-ui
+go-server/bin/trivy-server
+
+# Runtime generated data
+go-server/trend-history.json

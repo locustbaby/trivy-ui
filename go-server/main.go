@@ -34,6 +34,9 @@ func main() {
 		utils.LogWarning("Failed to load cache", map[string]interface{}{"error": err.Error()})
 	}
 
+	cacheSvc := api.NewCacheServiceImpl()
+	clusterRegistry := api.InitDefaultRegistry(cacheSvc)
+
 	hasCache := api.HasCacheData()
 	if hasCache {
 		utils.LogInfo("Cache data found, starting server quickly", map[string]interface{}{
@@ -140,7 +143,8 @@ func main() {
 			utils.LogWarning("Failed to set cluster client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
 		}
 
-		cacheUpdater := api.NewCacheUpdater()
+		registry := api.GetDefaultRegistry()
+		cacheUpdater := api.NewCacheUpdater(registry)
 		if err := k8sClient.StartInformer(c.Name, cacheUpdater); err != nil {
 			utils.LogWarning("Failed to start informer", map[string]interface{}{"cluster": c.Name, "error": err.Error(), "message": "Reports will still be available but won't auto-update via watch"})
 		} else {
@@ -209,7 +213,8 @@ func main() {
 			if err := api.SetClusterClient(first.Name, firstClient); err != nil {
 				utils.LogWarning("Failed to set cluster client", map[string]interface{}{"cluster": first.Name, "error": err.Error()})
 			}
-			cacheUpdater := api.NewCacheUpdater()
+			reg := api.GetDefaultRegistry()
+			cacheUpdater := api.NewCacheUpdater(reg)
 			if err := firstClient.StartInformer(first.Name, cacheUpdater); err != nil {
 				utils.LogWarning("Failed to start informer", map[string]interface{}{"cluster": first.Name, "error": err.Error()})
 			} else {
@@ -293,7 +298,7 @@ func main() {
 			log.Fatalf("No Kubernetes client initialized!")
 		}
 	}
-	router := api.NewRouter(firstClient, staticPath)
+	router := api.NewRouter(firstClient, staticPath, cacheSvc, clusterRegistry, config.GetGlobalRegistry())
 	utils.LogInfo("Router created")
 
 	corsHandler := cors.New(cors.Options{

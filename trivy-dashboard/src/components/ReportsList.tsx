@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import { useSearchParams } from "react-router-dom"
-import { api, type Report, type ReportType } from "../api/client"
+import { api, CLUSTER_SCOPED_NAMESPACE, type Report, type ReportType } from "../api/client"
 import { Button } from "./ui/button"
 import { MultiCombobox } from "./ui/multi-combobox"
 import { Search, Loader2, ArrowUp, Share2, Check, Shield, AlertTriangle, X } from "lucide-react"
@@ -9,16 +9,21 @@ interface ReportsListProps {
   typeName: string
   reportTypes: ReportType[]
   selectedCluster?: string
+  isSingleClusterMode?: boolean
   onSelectReport: (report: Report) => void
+  onTotalChange?: (typeName: string, total: number) => void
 }
 
 const PAGE_SIZE = 50
+const AUTO_REFRESH_INTERVAL = 15000
 
 export function ReportsList({
   typeName,
   reportTypes,
   selectedCluster,
+  isSingleClusterMode = false,
   onSelectReport,
+  onTotalChange,
 }: ReportsListProps) {
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -28,7 +33,7 @@ export function ReportsList({
   const urlShowAll = searchParams.get("showAll") !== "false" // default true
 
   // Parse URL namespaces once
-  const initialNamespaces = useMemo(() => {
+  const urlNamespaceValues = useMemo(() => {
     if (urlNamespaces) {
       return urlNamespaces.split(",").filter(Boolean)
     }
@@ -37,8 +42,8 @@ export function ReportsList({
 
   const [reports, setReports] = useState<Report[]>([])
   const [namespaces, setNamespaces] = useState<string[]>([])
-  const [selectedNamespaces, setSelectedNamespaces] = useState<string[]>(initialNamespaces)
-  const [searchQuery, setSearchQuery] = useState<string>(urlSearch)
+  const [selectedNamespaces, setSelectedNamespaces] = useState<string[]>(urlNamespaceValues)
+  const [searchInputValue, setSearchInputValue] = useState<string>(urlSearch)
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string>()
@@ -46,7 +51,6 @@ export function ReportsList({
   const [total, setTotal] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [showScrollTop, setShowScrollTop] = useState(false)
-  const [showAllReports, setShowAllReports] = useState(urlShowAll)
   const [copiedReportId, setCopiedReportId] = useState<string | null>(null)
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [namespacesLoaded, setNamespacesLoaded] = useState(false)
@@ -99,9 +103,8 @@ export function ReportsList({
   }, [])
 
   const handleSearchChange = useCallback((value: string) => {
-    setSearchQuery(value)
+    setSearchInputValue(value)
 
-    // Debounce URL update
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current)
     }
@@ -110,10 +113,8 @@ export function ReportsList({
     }, 300)
   }, [updateUrlParams])
 
-  // Sync showAll filter to URL
   const handleShowAllChange = useCallback((showAll: boolean) => {
-    setShowAllReports(showAll)
-    updateUrlParams({ showAll: showAll ? null : "false" }) // only store when false
+    updateUrlParams({ showAll: showAll ? null : "false" })
   }, [updateUrlParams])
 
   const copyReportLink = useCallback((report: Report, e: React.MouseEvent) => {
@@ -122,12 +123,7 @@ export function ReportsList({
     url.searchParams.set("cluster", report.cluster)
     url.searchParams.set("type", report.type)
     url.searchParams.set("report", report.name)
-    if (report.namespace) {
-      url.searchParams.set("namespace", report.namespace)
-    } else {
-      url.searchParams.delete("namespace")
-    }
-    // Remove filter params for clean share URL
+    url.searchParams.set("reportNamespace", report.namespace || CLUSTER_SCOPED_NAMESPACE)
     url.searchParams.delete("search")
     url.searchParams.delete("showAll")
 
@@ -184,17 +180,21 @@ export function ReportsList({
   }, [])
 
   // Fetch reports - this now uses URL namespace directly for initial load
-  const fetchReports = useCallback(async (pageNum: number, reset: boolean = false, overrideNamespaces?: string[]) => {
-    // Use override namespaces if provided, otherwise use selected namespaces
-    const namespacesToUse = overrideNamespaces ?? selectedNamespaces
+  const fetchReports = useCallback(async (
+    pageNum: number,
+    reset: boolean = false,
+    overrideNamespaces?: string[],
+    showLoadingState: boolean = true,
+    pageSizeOverride?: number
+  ) => {
+    const namespacesToUse = overrideNamespaces ?? urlNamespaceValues
     const namespaceParams = isNamespaced && namespacesToUse.length > 0 && !namespacesToUse.includes("all")
       ? namespacesToUse.join(",")
       : undefined
+    const effectivePageSize = pageSizeOverride ?? PAGE_SIZE
 
-    // Create a unique key for this request to prevent duplicates
-    const requestKey = `${typeName}-${selectedCluster}-${namespaceParams}-${pageNum}-${reset}`
+    const requestKey = `${typeName}-${selectedCluster}-${namespaceParams}-${pageNum}-${effectivePageSize}-${reset}-${urlSearch}-${urlShowAll}`
 
-    // Skip if the same request is already in progress
     if (fetchInProgressRef.current === requestKey) {
       return
     }
@@ -202,34 +202,50 @@ export function ReportsList({
     try {
       fetchInProgressRef.current = requestKey
 
-      if (reset) {
+      if (showLoadingState && reset) {
         setLoading(true)
-      } else {
+      } else if (showLoadingState) {
         setLoadingMore(true)
       }
       setError(undefined)
 
-      const response = await api.getReportsByType(typeName, pageNum, PAGE_SIZE, selectedCluster || undefined, namespaceParams)
+      const response = await api.getReportsByType(
+        typeName,
+        pageNum,
+        effectivePageSize,
+        selectedCluster || undefined,
+        namespaceParams,
+        urlSearch || undefined,
+        !urlShowAll
+      )
+      const responseData = Array.isArray(response.data) ? response.data : []
       setTotal(response.total)
+      if (!urlSearch && urlShowAll && namespaceParams === undefined) {
+        onTotalChange?.(typeName, response.total)
+      }
       if (reset) {
-        setReports(response.data)
+        setPage(Math.max(1, Math.ceil(responseData.length / PAGE_SIZE)))
+        setReports(responseData)
       } else {
-        // Deduplicate when loading more
         setReports((prev) => {
           const existingKeys = new Set(prev.map(r => `${r.cluster}-${r.namespace}-${r.name}`))
-          const newReports = response.data.filter(r => !existingKeys.has(`${r.cluster}-${r.namespace}-${r.name}`))
+          const newReports = responseData.filter(r => !existingKeys.has(`${r.cluster}-${r.namespace}-${r.name}`))
           return [...prev, ...newReports]
         })
       }
-      setHasMore(response.data.length === PAGE_SIZE && (pageNum * PAGE_SIZE) < response.total)
+      setHasMore(responseData.length === effectivePageSize && (pageNum * effectivePageSize) < response.total)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch reports")
+      if (showLoadingState) {
+        setError(err instanceof Error ? err.message : "Failed to fetch reports")
+      }
     } finally {
-      setLoading(false)
-      setLoadingMore(false)
+      if (showLoadingState) {
+        setLoading(false)
+        setLoadingMore(false)
+      }
       fetchInProgressRef.current = null
     }
-  }, [typeName, selectedCluster, selectedNamespaces, isNamespaced])
+  }, [typeName, selectedCluster, urlNamespaceValues, isNamespaced, urlSearch, urlShowAll, onTotalChange])
 
   // Fetch namespaces for the cluster
   const fetchNamespaces = useCallback(async (): Promise<string[]> => {
@@ -302,20 +318,27 @@ export function ReportsList({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [typeName, selectedCluster, isNamespaced])
 
-  // Handle subsequent namespace changes (after initial load)
-  const prevNamespacesRef = useRef<string>("")
+  useEffect(() => {
+    setSearchInputValue(urlSearch)
+  }, [urlSearch])
+
+  useEffect(() => {
+    setSelectedNamespaces(urlNamespaceValues)
+  }, [urlNamespaceValues])
+
+  const prevFiltersRef = useRef<string>("")
   useEffect(() => {
     if (isFirstLoad.current) return
     if (!namespacesLoaded && isNamespaced) return
 
-    const currentNs = JSON.stringify([...selectedNamespaces].sort())
-    if (currentNs !== prevNamespacesRef.current) {
-      prevNamespacesRef.current = currentNs
+    const filtersKey = `${urlNamespaces}-${urlSearch}-${urlShowAll}`
+    if (filtersKey !== prevFiltersRef.current) {
+      prevFiltersRef.current = filtersKey
       setPage(1)
-      setHasMore(false) // Reset hasMore when namespace changes
+      setHasMore(false)
       fetchReports(1, true)
     }
-  }, [selectedNamespaces, namespacesLoaded, isNamespaced, fetchReports])
+  }, [urlNamespaces, urlSearch, urlShowAll, namespacesLoaded, isNamespaced, fetchReports])
 
   const loadMore = useCallback(() => {
     if (!loadingMore && hasMore) {
@@ -326,7 +349,7 @@ export function ReportsList({
   }, [page, loadingMore, hasMore, fetchReports])
 
   useEffect(() => {
-    if (!hasMore) return // Don't set up observer if there's no more data
+    if (!hasMore) return
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -348,6 +371,38 @@ export function ReportsList({
       }
     }
   }, [loadMore, hasMore, loadingMore])
+
+  useEffect(() => {
+    if (!typeName || !selectedCluster) return
+
+    const refresh = () => {
+      const loadedPageSize = Math.max(PAGE_SIZE, page * PAGE_SIZE)
+      fetchReports(1, true, undefined, false, loadedPageSize)
+    }
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        refresh()
+      }
+    }, AUTO_REFRESH_INTERVAL)
+
+
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refresh()
+      }
+    }
+
+    window.addEventListener("focus", refresh)
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener("focus", refresh)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+    }
+  }, [typeName, selectedCluster, page, fetchReports])
 
   const getSummaryCounts = (report: Report) => {
     if (!report.data || typeof report.data !== "object") return null
@@ -372,46 +427,9 @@ export function ReportsList({
     return null
   }
 
-  const hasVulnerabilities = (report: Report): boolean => {
-    const counts = getSummaryCounts(report)
-    if (!counts) return false
-    return counts.critical > 0 || counts.high > 0 || counts.medium > 0 || counts.low > 0
-  }
-
   const filteredReports = useMemo(() => {
-    let filtered = reports
-
-    if (!showAllReports) {
-      filtered = filtered.filter((r) => hasVulnerabilities(r))
-    }
-
-    if (searchQuery) {
-      const lowerQuery = searchQuery.toLowerCase()
-      filtered = filtered.filter((r) => {
-        return (
-          r.name.toLowerCase().includes(lowerQuery) ||
-          r.cluster.toLowerCase().includes(lowerQuery) ||
-          (r.namespace || "").toLowerCase().includes(lowerQuery)
-        )
-      })
-    }
-
-    // Sort for stable results: cluster -> namespace -> name
-    filtered = [...filtered].sort((a, b) => {
-      // 1. Sort by cluster
-      const clusterCompare = a.cluster.localeCompare(b.cluster)
-      if (clusterCompare !== 0) return clusterCompare
-      // 2. Sort by namespace (empty namespace goes last)
-      const nsA = a.namespace || "\uffff" // Use high unicode char to sort empty last
-      const nsB = b.namespace || "\uffff"
-      const nsCompare = nsA.localeCompare(nsB)
-      if (nsCompare !== 0) return nsCompare
-      // 3. Sort by name
-      return a.name.localeCompare(b.name)
-    })
-
-    return filtered
-  }, [reports, searchQuery, showAllReports])
+    return reports
+  }, [reports])
 
   const namespaceOptions = useMemo(() => {
     return [
@@ -441,12 +459,11 @@ export function ReportsList({
 
   return (
     <div className="space-y-6" ref={containerRef}>
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-2xl font-bold">Reports</h2>
-          <p className="text-sm text-muted-foreground mt-1">
-            {showAllReports ? (
+          <p className="text-sm text-muted-foreground">
+            {urlShowAll ? (
               <>
                 Showing <span className="font-semibold text-foreground">{filteredReports.length}</span>
                 {hasMore && <span> (loaded {reports.length})</span>}
@@ -462,7 +479,7 @@ export function ReportsList({
             )}
           </p>
         </div>
-        <Button onClick={() => fetchReports(1, true)} variant="outline" size="sm" className="gap-2">
+        <Button onClick={() => fetchReports(1, true)} variant="outline" size="sm" className="h-9 gap-2 px-3.5">
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
@@ -500,11 +517,11 @@ export function ReportsList({
             <input
               type="text"
               className="w-full pl-10 pr-10 py-2.5 rounded-xl border bg-background text-sm outline-none focus:ring-2 focus:ring-primary/50 transition-shadow"
-              placeholder="Search by name, cluster, namespace..."
-              value={searchQuery}
+              placeholder={isSingleClusterMode ? "Search by name, namespace..." : "Search by name, cluster, namespace..."}
+              value={searchInputValue}
               onChange={(e) => handleSearchChange(e.target.value)}
             />
-            {searchQuery && (
+            {searchInputValue && (
               <button
                 onClick={() => handleSearchChange("")}
                 className="absolute right-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground hover:text-foreground transition-colors"
@@ -517,13 +534,13 @@ export function ReportsList({
         </div>
         <div className="flex items-stretch sm:items-end gap-2">
           <Button
-            onClick={() => handleShowAllChange(!showAllReports)}
-            variant={showAllReports ? "outline" : "default"}
+            onClick={() => handleShowAllChange(!urlShowAll)}
+            variant={urlShowAll ? "outline" : "default"}
             size="sm"
             className="h-11 px-4 gap-2 flex-1 sm:flex-initial"
-            title={showAllReports ? "Show only vulnerable" : "Show all reports"}
+            title={urlShowAll ? "Show only vulnerable" : "Show all reports"}
           >
-            {showAllReports ? (
+            {urlShowAll ? (
               <>
                 <Shield className="h-4 w-4" />
                 <span className="hidden sm:inline">All</span>
@@ -599,20 +616,22 @@ export function ReportsList({
                         )}
                       </div>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                        <button
-                          onClick={(e) => copyToClipboard(report.cluster, `cluster-${reportId}`, e)}
-                          className="inline-flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer"
-                          title="Click to copy cluster name"
-                        >
-                          {copiedField === `cluster-${reportId}` ? (
-                            <Check className="h-3.5 w-3.5 text-green-500" />
-                          ) : (
-                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                            </svg>
-                          )}
-                          <span className={copiedField === `cluster-${reportId}` ? "text-green-500" : ""}>{report.cluster}</span>
-                        </button>
+                        {!isSingleClusterMode && (
+                          <button
+                            onClick={(e) => copyToClipboard(report.cluster, `cluster-${reportId}`, e)}
+                            className="inline-flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer"
+                            title="Click to copy cluster name"
+                          >
+                            {copiedField === `cluster-${reportId}` ? (
+                              <Check className="h-3.5 w-3.5 text-green-500" />
+                            ) : (
+                              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                              </svg>
+                            )}
+                            <span className={copiedField === `cluster-${reportId}` ? "text-green-500" : ""}>{report.cluster}</span>
+                          </button>
+                        )}
                         {report.namespace && (
                           <button
                             onClick={(e) => copyToClipboard(report.namespace!, `ns-${reportId}`, e)}

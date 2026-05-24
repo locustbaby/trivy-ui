@@ -8,6 +8,7 @@ interface ReportInfoCardProps {
   artifact: any
   scanner: any
   hasVulnerabilitiesType: boolean
+  isSingleClusterMode?: boolean
 }
 
 export function ReportInfoCard({
@@ -16,6 +17,7 @@ export function ReportInfoCard({
   artifact,
   scanner,
   hasVulnerabilitiesType,
+  isSingleClusterMode = false,
 }: ReportInfoCardProps) {
   const [copiedField, setCopiedField] = useState<string | null>(null)
 
@@ -53,10 +55,12 @@ export function ReportInfoCard({
           <span className="text-xs text-muted-foreground">Name:</span>
           <CopyableField value={report.name} fieldId="name" className="font-semibold" />
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs text-muted-foreground">Cluster:</span>
-          <CopyableField value={report.cluster} fieldId="cluster" />
-        </div>
+        {!isSingleClusterMode && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-muted-foreground">Cluster:</span>
+            <CopyableField value={report.cluster} fieldId="cluster" />
+          </div>
+        )}
         {report.namespace && (
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">Namespace:</span>

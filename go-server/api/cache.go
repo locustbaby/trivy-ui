@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,10 +20,41 @@ import (
 )
 
 var globalCache *Cache
-var cache *Cache
 
 // Track ongoing async refreshes to prevent duplicate refreshes
 var refreshInProgress sync.Map // map[string]bool, key is reportDetailKey
+
+var typeVersions sync.Map
+
+func incrementTypeVersion(reportType string) {
+	if val, ok := typeVersions.Load(reportType); ok {
+		if num, ok := val.(uint64); ok {
+			typeVersions.Store(reportType, num+1)
+		}
+	} else {
+		typeVersions.Store(reportType, uint64(1))
+	}
+	evictQueryCacheForType(reportType)
+}
+
+func evictQueryCacheForType(reportType string) {
+	prefix := reportType + "|"
+	queryResultCache.Range(func(key, _ any) bool {
+		if k, ok := key.(string); ok && len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			queryResultCache.Delete(k)
+		}
+		return true
+	})
+}
+
+func getTypeVersion(reportType string) uint64 {
+	if val, ok := typeVersions.Load(reportType); ok {
+		if num, ok := val.(uint64); ok {
+			return num
+		}
+	}
+	return 0
+}
 
 // reportCounts stores atomic counters for report totals and vulnerability counts
 // Key format: "count:<cluster>:<type>" or "count:<cluster>:<ns>:<type>"
@@ -105,6 +137,7 @@ func InitCache() error {
 	}
 
 	go globalCache.periodicSave()
+	go globalCache.periodicTrendRecord()
 
 	return nil
 }
@@ -161,6 +194,7 @@ func (c *Cache) Set(key string, value interface{}, expiration time.Duration) {
 				c.typeIndex[typ] = make(map[string]bool)
 			}
 			c.typeIndex[typ][key] = true
+			incrementTypeVersion(typ)
 		}
 	}
 	c.mu.Unlock()
@@ -178,9 +212,42 @@ func (c *Cache) Delete(key string) {
 			if idx, ok := c.typeIndex[typ]; ok {
 				delete(idx, key)
 			}
+			incrementTypeVersion(typ)
 		}
 	}
 	c.mu.Unlock()
+}
+
+func (c *Cache) DeleteReportEntry(cluster, namespace, reportType, name string) {
+	c.deleteReportEntryByKey(reportKey(cluster, namespace, reportType, name))
+}
+
+func (c *Cache) deleteReportEntryByKey(key string) {
+	cluster, namespace, reportType, name, ok := parseReportCacheKey(key)
+	if !ok {
+		c.Delete(key)
+		return
+	}
+
+	value, found := c.Get(key)
+	if !found {
+		c.Delete(key)
+		c.Delete(reportDetailKey(cluster, namespace, reportType, name))
+		return
+	}
+
+	hasVuln := false
+	switch typed := value.(type) {
+	case Report:
+		hasVuln = hasVulnerabilitiesInReport(typed)
+	case map[string]interface{}:
+		report := Report{Data: typed["data"]}
+		hasVuln = hasVulnerabilitiesInReport(report)
+	}
+
+	c.Delete(key)
+	c.Delete(reportDetailKey(cluster, namespace, reportType, name))
+	DecrementReportCount(cluster, namespace, reportType, hasVuln)
 }
 
 func (c *Cache) Items() map[string]interface{} {
@@ -252,6 +319,85 @@ func (c *Cache) ItemsByType(typeName string) map[string]interface{} {
 		}
 	}
 	return result
+}
+
+func (c *Cache) GetReports(typeName, clusterFilter string, namespaceFilters []string) []Report {
+	version := getTypeVersion(typeName)
+	namespacesStr := strings.Join(namespaceFilters, ",")
+	cacheKey := fmt.Sprintf("sorted_list:%s:%s:%s:%d", typeName, clusterFilter, namespacesStr, version)
+
+	if cachedVal, found := c.cache.Get(cacheKey); found {
+		if sortedSlice, ok := cachedVal.([]Report); ok {
+			return sortedSlice
+		}
+	}
+
+	c.mu.RLock()
+	idx, ok := c.typeIndex[typeName]
+	if !ok {
+		c.mu.RUnlock()
+		return nil
+	}
+
+	var reports []Report
+	for k := range idx {
+		parts := strings.SplitN(k, ":", 5)
+		if len(parts) < 5 {
+			continue
+		}
+		cluster := parts[1]
+		namespace := parts[2]
+
+		if clusterFilter != "" && cluster != clusterFilter {
+			continue
+		}
+
+		if len(namespaceFilters) > 0 && namespace != "" {
+				matched := false
+				for _, nf := range namespaceFilters {
+					if nf == "all" || namespace == nf {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					continue
+				}
+			}
+
+		if item, found := c.items[k]; found {
+			if rep, ok := item.Value.(Report); ok {
+				reports = append(reports, rep)
+			}
+		}
+	}
+	c.mu.RUnlock()
+
+	sort.Slice(reports, func(i, j int) bool {
+		if reports[i].Cluster != reports[j].Cluster {
+			return reports[i].Cluster < reports[j].Cluster
+		}
+		nsI := reports[i].Namespace
+		nsJ := reports[j].Namespace
+		if nsI == "" && nsJ != "" {
+			return false
+		}
+		if nsI != "" && nsJ == "" {
+			return true
+		}
+		if nsI != nsJ {
+			return nsI < nsJ
+		}
+		return reports[i].Name < reports[j].Name
+	})
+
+	cost := int64(len(cacheKey))
+	for _, r := range reports {
+		cost += 100 + estimateSize(r.Data)
+	}
+	c.cache.SetWithTTL(cacheKey, reports, cost, 5*time.Minute)
+
+	return reports
 }
 
 func (c *Cache) GetReportCount(reportType, cluster string) (total int, withVulnerabilities int) {
@@ -387,6 +533,14 @@ func (c *Cache) LoadFromFile() error {
 	now := time.Now().Unix()
 	for k, item := range items {
 		isReport := strings.HasPrefix(k, "report:")
+		if isReport {
+			var report Report
+			if b, err := json.Marshal(item.Value); err == nil {
+				if err := json.Unmarshal(b, &report); err == nil {
+					item.Value = report
+				}
+			}
+		}
 		if item.Expiration > now {
 			expiration := time.Duration(item.Expiration-now) * time.Second
 			if isReport && expiration < 24*time.Hour {
@@ -483,10 +637,7 @@ func (c *Cache) SaveToFile() error {
 }
 
 func getCache() *Cache {
-	if cache == nil {
-		cache = GetCache()
-	}
-	return cache
+	return GetCache()
 }
 
 func clusterKey(name string) string {
@@ -499,6 +650,17 @@ func namespaceKey(cluster, ns string) string {
 
 func reportKey(cluster, ns, typ, name string) string {
 	return fmt.Sprintf("report:%s:%s:%s:%s", cluster, ns, typ, name)
+}
+
+func parseReportCacheKey(key string) (cluster, namespace, reportType, name string, ok bool) {
+	if !strings.HasPrefix(key, "report:") {
+		return "", "", "", "", false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(key, "report:"), ":", 4)
+	if len(parts) < 4 {
+		return "", "", "", "", false
+	}
+	return parts[0], parts[1], parts[2], parts[3], true
 }
 
 func reportTypeFromKey(key string) string {
@@ -695,14 +857,7 @@ func (c *Cache) ValidateAndCleanup(ctx context.Context) {
 						_, exists, _ := store.GetByKey(storeKey)
 						if !exists {
 							cacheKey := reportKey(name, ns, typ, repName)
-							c.mu.Lock()
-							delete(c.items, cacheKey)
-							delete(c.reportKeys, cacheKey)
-							c.cache.Del(c.hashKey(cacheKey))
-							if keyStr, ok := c.keyMap[c.hashKey(cacheKey)]; ok && keyStr == cacheKey {
-								delete(c.keyMap, c.hashKey(cacheKey))
-							}
-							c.mu.Unlock()
+							c.deleteReportEntryByKey(cacheKey)
 							utils.LogDebug("Removed stale cache entry", map[string]interface{}{
 								"cluster":   name,
 								"namespace": ns,
@@ -723,14 +878,7 @@ func (c *Cache) ValidateAndCleanup(ctx context.Context) {
 						}
 						if !found {
 							cacheKey := reportKey(name, ns, typ, repName)
-							c.mu.Lock()
-							delete(c.items, cacheKey)
-							delete(c.reportKeys, cacheKey)
-							c.cache.Del(c.hashKey(cacheKey))
-							if keyStr, ok := c.keyMap[c.hashKey(cacheKey)]; ok && keyStr == cacheKey {
-								delete(c.keyMap, c.hashKey(cacheKey))
-							}
-							c.mu.Unlock()
+							c.deleteReportEntryByKey(cacheKey)
 							utils.LogDebug("Removed stale cache entry", map[string]interface{}{
 								"cluster":   name,
 								"namespace": ns,
@@ -763,10 +911,12 @@ func HasCacheData() bool {
 	return false
 }
 
-type CacheUpdaterImpl struct{}
+type CacheUpdaterImpl struct {
+	reg *ClusterRegistry
+}
 
-func NewCacheUpdater() kubernetes.CacheUpdater {
-	return &CacheUpdaterImpl{}
+func NewCacheUpdater(reg *ClusterRegistry) kubernetes.CacheUpdater {
+	return &CacheUpdaterImpl{reg: reg}
 }
 
 func (c *CacheUpdaterImpl) SetReport(cluster, namespace, reportType, name string, report *kubernetes.Report) {
@@ -795,18 +945,21 @@ func (c *CacheUpdaterImpl) SetReport(cluster, namespace, reportType, name string
 	cache.Set(key, apiReport, 7*24*time.Hour)
 }
 
+func (c *CacheUpdaterImpl) InvalidateReportDetail(cluster, namespace, reportType, name string) {
+	cache := getCache()
+	if cache == nil {
+		return
+	}
+	cache.Delete(reportDetailKey(cluster, namespace, reportType, name))
+}
+
 func (c *CacheUpdaterImpl) DeleteReport(cluster, namespace, reportType, name string) {
 	cache := getCache()
 	if cache == nil {
 		return
 	}
 
-	key := reportKey(cluster, namespace, reportType, name)
-	cache.Delete(key)
-
-	// Also delete detail cache
-	detailKey := reportDetailKey(cluster, namespace, reportType, name)
-	cache.Delete(detailKey)
+	cache.DeleteReportEntry(cluster, namespace, reportType, name)
 }
 
 func (c *CacheUpdaterImpl) IncrementCount(cluster, namespace, reportType string, hasVuln bool) {
@@ -819,6 +972,16 @@ func (c *CacheUpdaterImpl) DecrementCount(cluster, namespace, reportType string,
 
 func (c *CacheUpdaterImpl) AdjustVulnCount(cluster, namespace, reportType string, delta int) {
 	AdjustVulnCount(cluster, namespace, reportType, delta)
+}
+
+func (c *CacheUpdaterImpl) UpdateSyncState(clusterName string, state string) {
+	if c.reg != nil {
+		if client := c.reg.Get(clusterName); client != nil {
+			client.mu.Lock()
+			client.SyncState = state
+			client.mu.Unlock()
+		}
+	}
 }
 
 // reportDetailKey returns the cache key for full report details
@@ -1129,13 +1292,233 @@ func GetReportDetailWithTTL(cluster, namespace, reportType, name string) (Report
 	return Report{}, false, 0
 }
 
-func init() {
-	if err := LoadCache(); err != nil {
-		utils.LogWarning("Failed to initialize cache", map[string]interface{}{"error": err.Error()})
-		return
+func extractSummaryCounts(report Report) (int, int, int, int) {
+	if report.Data == nil {
+		return 0, 0, 0, 0
 	}
-	cache = GetCache()
-	if cache == nil {
-		utils.LogWarning("Cache is nil after initialization", nil)
+
+	data, ok := report.Data.(map[string]interface{})
+	if !ok {
+		return 0, 0, 0, 0
 	}
+
+	var summary map[string]interface{}
+
+	if reportObj, ok := data["report"].(map[string]interface{}); ok {
+		if s, ok := reportObj["summary"].(map[string]interface{}); ok {
+			summary = s
+		}
+	}
+
+	if summary == nil {
+		if s, ok := data["summary"].(map[string]interface{}); ok {
+			summary = s
+		}
+	}
+
+	if summary == nil {
+		return 0, 0, 0, 0
+	}
+
+	getInt := func(key string) int {
+		if count, ok := summary[key].(float64); ok {
+			return int(count)
+		}
+		if count, ok := summary[key].(int); ok {
+			return count
+		}
+		if count, ok := summary[key].(int64); ok {
+			return int(count)
+		}
+		return 0
+	}
+
+	return getInt("criticalCount"), getInt("highCount"), getInt("mediumCount"), getInt("lowCount")
+}
+
+func (c *Cache) GetOverviewData(clusterFilter string) *ClusterOverview {
+	overview := &ClusterOverview{
+		SeverityTotals: SeverityTotals{},
+		ScanTypesBreakdown: make(map[string]TypeBreakdown),
+		TopVulnerableWorkloads: make([]WorkloadSummary, 0),
+		VulnerableClusters: make([]ClusterSummary, 0),
+		VulnerableNamespaces: make([]NamespaceSummary, 0),
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	workloadScores := make(map[string]*WorkloadSummary)
+	nsScores := make(map[string]*NamespaceSummary)
+	clusterScores := make(map[string]*ClusterSummary)
+
+	for key, item := range c.items {
+		if !strings.HasPrefix(key, "report:") {
+			continue
+		}
+		
+		report, ok := convertCacheValue[Report](item.Value)
+		if !ok {
+			continue
+		}
+
+		if clusterFilter != "" && report.Cluster != clusterFilter {
+			continue
+		}
+
+		overview.TotalReports++
+
+		cCount, hCount, mCount, lCount := extractSummaryCounts(report)
+
+		overview.SeverityTotals.Critical += cCount
+		overview.SeverityTotals.High += hCount
+		overview.SeverityTotals.Medium += mCount
+		overview.SeverityTotals.Low += lCount
+
+		tb := overview.ScanTypesBreakdown[report.Type]
+		tb.Scanned++
+		if cCount > 0 || hCount > 0 || mCount > 0 || lCount > 0 {
+			tb.Failed++
+		}
+		tb.Critical += cCount
+		overview.ScanTypesBreakdown[report.Type] = tb
+
+		if cCount > 0 || hCount > 0 {
+			wKey := fmt.Sprintf("%s:%s:%s:%s", report.Cluster, report.Namespace, report.Type, report.Name)
+			if _, exists := workloadScores[wKey]; !exists {
+				workloadScores[wKey] = &WorkloadSummary{
+					Cluster: report.Cluster, Namespace: report.Namespace, Name: report.Name, Type: report.Type,
+				}
+			}
+			workloadScores[wKey].Critical += cCount
+			workloadScores[wKey].High += hCount
+
+			nsKey := fmt.Sprintf("%s:%s", report.Cluster, report.Namespace)
+			if _, exists := nsScores[nsKey]; !exists {
+				nsScores[nsKey] = &NamespaceSummary{Name: report.Namespace}
+			}
+			nsScores[nsKey].Critical += cCount
+			nsScores[nsKey].High += hCount
+
+			cKey := report.Cluster
+			if _, exists := clusterScores[cKey]; !exists {
+				clusterScores[cKey] = &ClusterSummary{Name: report.Cluster}
+			}
+			clusterScores[cKey].Critical += cCount
+			clusterScores[cKey].High += hCount
+		}
+	}
+
+	for _, w := range workloadScores {
+		overview.TopVulnerableWorkloads = append(overview.TopVulnerableWorkloads, *w)
+	}
+	sort.Slice(overview.TopVulnerableWorkloads, func(i, j int) bool {
+		if overview.TopVulnerableWorkloads[i].Critical != overview.TopVulnerableWorkloads[j].Critical {
+			return overview.TopVulnerableWorkloads[i].Critical > overview.TopVulnerableWorkloads[j].Critical
+		}
+		return overview.TopVulnerableWorkloads[i].High > overview.TopVulnerableWorkloads[j].High
+	})
+	if len(overview.TopVulnerableWorkloads) > 5 {
+		overview.TopVulnerableWorkloads = overview.TopVulnerableWorkloads[:5]
+	}
+
+	if clusterFilter == "" {
+		for _, cScore := range clusterScores {
+			overview.VulnerableClusters = append(overview.VulnerableClusters, *cScore)
+		}
+		sort.Slice(overview.VulnerableClusters, func(i, j int) bool {
+			if overview.VulnerableClusters[i].Critical != overview.VulnerableClusters[j].Critical {
+				return overview.VulnerableClusters[i].Critical > overview.VulnerableClusters[j].Critical
+			}
+			return overview.VulnerableClusters[i].High > overview.VulnerableClusters[j].High
+		})
+	} else {
+		for _, ns := range nsScores {
+			overview.VulnerableNamespaces = append(overview.VulnerableNamespaces, *ns)
+		}
+		sort.Slice(overview.VulnerableNamespaces, func(i, j int) bool {
+			if overview.VulnerableNamespaces[i].Critical != overview.VulnerableNamespaces[j].Critical {
+				return overview.VulnerableNamespaces[i].Critical > overview.VulnerableNamespaces[j].Critical
+			}
+			return overview.VulnerableNamespaces[i].High > overview.VulnerableNamespaces[j].High
+		})
+	}
+
+	return overview
+}
+
+func (c *Cache) recordTrend() {
+	cfg := config.Get()
+	trendFile := "trend-history.json"
+	if cfg.DataPath != "" && cfg.DataPath != "." {
+		trendFile = filepath.Join(cfg.DataPath, "trend-history.json")
+	}
+
+	var records []TrendRecord
+	data, err := os.ReadFile(trendFile)
+	if err == nil {
+		json.Unmarshal(data, &records)
+	}
+
+	global := c.GetOverviewData("")
+	now := time.Now()
+	
+	records = append(records, TrendRecord{
+		Timestamp: now,
+		Cluster:   "",
+		Critical:  global.SeverityTotals.Critical,
+		High:      global.SeverityTotals.High,
+		Medium:    global.SeverityTotals.Medium,
+	})
+
+	for _, cluster := range global.VulnerableClusters {
+		co := c.GetOverviewData(cluster.Name)
+		records = append(records, TrendRecord{
+			Timestamp: now,
+			Cluster:   cluster.Name,
+			Critical:  co.SeverityTotals.Critical,
+			High:      co.SeverityTotals.High,
+			Medium:    co.SeverityTotals.Medium,
+		})
+	}
+
+	if len(records) > 10000 {
+		records = records[len(records)-10000:]
+	}
+
+	b, _ := json.MarshalIndent(records, "", "  ")
+	os.WriteFile(trendFile, b, 0644)
+}
+
+func (c *Cache) periodicTrendRecord() {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	
+	c.recordTrend()
+	for range ticker.C {
+		c.recordTrend()
+	}
+}
+
+func (c *Cache) GetTrends(clusterFilter string, days int) []TrendRecord {
+	cfg := config.Get()
+	trendFile := "trend-history.json"
+	if cfg.DataPath != "" && cfg.DataPath != "." {
+		trendFile = filepath.Join(cfg.DataPath, "trend-history.json")
+	}
+	var records []TrendRecord
+	data, err := os.ReadFile(trendFile)
+	if err == nil {
+		json.Unmarshal(data, &records)
+	}
+
+	cutoff := time.Now().Add(-time.Duration(days*24) * time.Hour)
+	
+	var filtered []TrendRecord
+	for _, r := range records {
+		if r.Cluster == clusterFilter && r.Timestamp.After(cutoff) {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }

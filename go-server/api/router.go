@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
+	"trivy-ui/config"
 	"trivy-ui/kubernetes"
 
 	httpSwagger "github.com/swaggo/http-swagger"
@@ -14,10 +16,10 @@ type Router struct {
 	handler *Handler
 }
 
-func NewRouter(k8sClient *kubernetes.Client, staticPath string) *Router {
+func NewRouter(k8sClient *kubernetes.Client, staticPath string, cache CacheService, clusterReg *ClusterRegistry, crdReg *config.CRDRegistry) *Router {
 	r := &Router{
 		mux:     http.NewServeMux(),
-		handler: NewHandler(k8sClient),
+		handler: NewHandler(k8sClient, cache, clusterReg, NewQueryService(cache), crdReg),
 	}
 	r.Setup(staticPath)
 	return r
@@ -43,6 +45,75 @@ func (r *Router) Setup(staticPath string) {
 			} else {
 				http.NotFound(w, req)
 			}
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	r.mux.HandleFunc("/api/v1/overview", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet || req.Method == http.MethodOptions {
+			r.handler.GetOverview(w, req)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	r.mux.HandleFunc("/api/v1/overview/trends", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet || req.Method == http.MethodOptions {
+			r.handler.GetOverviewTrends(w, req)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	r.mux.HandleFunc("/api/v1/reports", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet || req.Method == http.MethodOptions {
+			r.handler.GetReportsV1(w, req)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	r.mux.HandleFunc("/api/v1/reports/detail", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet || req.Method == http.MethodOptions {
+			r.handler.GetReportDetails(w, req)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	r.mux.HandleFunc("/api/v1/reports/", func(w http.ResponseWriter, req *http.Request) {
+		path := strings.TrimPrefix(req.URL.Path, "/api/v1/reports/")
+		parts := strings.Split(path, "/")
+		if req.Method == http.MethodGet || req.Method == http.MethodOptions {
+			if len(parts) == 4 {
+				cluster, err := url.PathUnescape(parts[0])
+				if err != nil {
+					http.NotFound(w, req)
+					return
+				}
+				typeName, err := url.PathUnescape(parts[1])
+				if err != nil {
+					http.NotFound(w, req)
+					return
+				}
+				namespace, err := url.PathUnescape(parts[2])
+				if err != nil {
+					http.NotFound(w, req)
+					return
+				}
+				reportName, err := url.PathUnescape(parts[3])
+				if err != nil {
+					http.NotFound(w, req)
+					return
+				}
+				if namespace == "_" {
+					namespace = ""
+				}
+				r.handler.GetReportDetailsByRef(w, req, cluster, typeName, namespace, reportName)
+				return
+			}
+			http.NotFound(w, req)
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
