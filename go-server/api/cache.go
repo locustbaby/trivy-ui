@@ -740,20 +740,20 @@ func (c *Cache) ValidateAndCleanup(ctx context.Context) {
 	c.mu.RUnlock()
 
 	if len(reportKeysCopy) == 0 {
-		utils.LogInfo("No cache data to validate")
+		utils.LogDebug("No cache data to validate")
 		return
 	}
 
 	clients := GetAllClusterClients()
 	if len(clients) == 0 {
-		utils.LogInfo("No cluster clients available, skipping cache validation")
+		utils.LogDebug("No cluster clients available, skipping cache validation")
 		return
 	}
 
 	registry := config.GetGlobalRegistry()
 	reports := registry.GetAllReports()
 	if len(reports) == 0 {
-		utils.LogInfo("No report types discovered, skipping cache validation")
+		utils.LogDebug("No report types discovered, skipping cache validation")
 		return
 	}
 

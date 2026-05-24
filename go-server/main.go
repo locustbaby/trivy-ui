@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,9 +25,14 @@ import (
 )
 
 func main() {
-	utils.LogInfo("Server starting", map[string]interface{}{"version": GetVersion()})
-	utils.LogInfo("Configuration loaded")
 	cfg := config.Get()
+	utils.LogInfo("Server starting", map[string]interface{}{
+		"version":    GetVersion(),
+		"host":       cfg.Host,
+		"port":       cfg.Port,
+		"data_path":  cfg.DataPath,
+		"log_level":  os.Getenv("LOG_LEVEL"),
+	})
 
 	if err := api.LoadCache(); err != nil {
 		utils.LogWarning("Failed to load cache", map[string]interface{}{"error": err.Error()})
@@ -39,11 +43,9 @@ func main() {
 
 	hasCache := api.HasCacheData()
 	if hasCache {
-		utils.LogInfo("Cache data found, starting server quickly", map[string]interface{}{
-			"message": "Kubernetes initialization will happen in background",
-		})
+		utils.LogInfo("Cache data found, K8s init will run in background")
 	} else {
-		utils.LogInfo("No cache data found, initializing Kubernetes clients first")
+		utils.LogInfo("No cache found, initializing Kubernetes clients synchronously")
 	}
 
 	// 多集群 client map
@@ -294,8 +296,8 @@ func main() {
 			}
 		}
 		if firstClient == nil {
-			utils.LogError("No Kubernetes client initialized", nil)
-			log.Fatalf("No Kubernetes client initialized!")
+			utils.LogError("No Kubernetes client initialized, exiting", nil)
+			os.Exit(1)
 		}
 	}
 	router := api.NewRouter(firstClient, staticPath, cacheSvc, clusterRegistry, config.GetGlobalRegistry())
@@ -331,9 +333,9 @@ func main() {
 	accessLogHandler := api.AccessLogHandler(corsHandler.Handler(router))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	utils.LogInfo("Server starting", map[string]interface{}{"address": addr})
+	utils.LogInfo("Listening", map[string]interface{}{"address": addr})
 	if err := http.ListenAndServe(addr, accessLogHandler); err != nil {
 		utils.LogError("Server failed to start", map[string]interface{}{"error": err.Error()})
-		log.Fatalf("Server failed to start: %v", err)
+		os.Exit(1)
 	}
 }
