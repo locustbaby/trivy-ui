@@ -45,8 +45,10 @@ ingress:
   enabled: false
   className: "nginx"
   annotations: {}
-    # kubernetes.io/ingress.class: nginx
-    # kubernetes.io/tls-acme: "true"
+  oauth2Proxy:
+    enabled: false
+    host: ""
+    traefikMiddleware: "default-oauth2-proxy@kubernetescrd"
   hosts:
     - host: trivy-ui.example.com
       paths:

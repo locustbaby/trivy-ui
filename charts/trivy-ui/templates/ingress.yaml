@@ -16,10 +16,18 @@ metadata:
   name: {{ $fullName }}
   labels:
     {{- include "trivy-ui.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
   annotations:
+    {{- if .Values.ingress.oauth2Proxy.enabled }}
+    {{- if eq .Values.ingress.className "nginx" }}
+    nginx.ingress.kubernetes.io/auth-signin: "https://{{ .Values.ingress.oauth2Proxy.host | default (index .Values.ingress.hosts 0).host }}/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-url: "https://{{ .Values.ingress.oauth2Proxy.host | default (index .Values.ingress.hosts 0).host }}/oauth2/auth"
+    {{- else if eq .Values.ingress.className "traefik" }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ .Values.ingress.oauth2Proxy.traefikMiddleware | default "default-oauth2-proxy@kubernetescrd" }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   {{- if and .Values.ingress.className (semverCompare ">=1.18-0" .Capabilities.KubeVersion.GitVersion) }}
   ingressClassName: {{ .Values.ingress.className }}
