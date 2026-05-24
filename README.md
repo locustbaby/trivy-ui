@@ -7,7 +7,13 @@ Trivy UI provides a centralized dashboard for viewing vulnerability reports gene
 
 ## Screenshots
 
-### Dashboard Overview
+### Fleet Hub
+![Fleet Hub](./docs/global-overview.png)
+
+### Cluster Overview
+![Cluster Overview](./docs/cluster-overivew.png)
+
+### Reports Dashboard
 ![Dashboard Overview](./docs/dashboard.png)
 
 ### Report Details
@@ -72,6 +78,8 @@ For detailed Helm chart documentation, see [charts/trivy-ui/README.md](charts/tr
 
 ## Features
 - **Multi-Cluster Support**: View reports from multiple Kubernetes clusters via kubeconfig directory
+- **Fleet Hub**: Start with a cross-cluster overview page when multiple clusters are available
+- **Cluster Overview**: Drill into per-cluster severity trends, scan breakdowns, and vulnerable workloads
 - **All Trivy CRD Types**: Auto-discovers all Trivy Operator CRDs (VulnerabilityReport, ConfigAuditReport, SbomReport, ExposedSecretReport, RbacAssessmentReport, InfraAssessmentReport, and their cluster-scoped variants)
 - **Namespace Selector**: Multi-select namespace filtering with URL persistence
 - **Vulnerability Filter**: Toggle to show only reports with vulnerabilities

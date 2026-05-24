@@ -92,12 +92,12 @@ type NamespaceSummary struct {
 }
 
 type ClusterOverview struct {
-	TotalReports           int                               `json:"total_reports"`
-	SeverityTotals         SeverityTotals                    `json:"severity_totals"`
-	ScanTypesBreakdown     map[string]TypeBreakdown          `json:"scan_types_breakdown"`
-	TopVulnerableWorkloads []WorkloadSummary                 `json:"top_vulnerable_workloads"`
-	VulnerableClusters     []ClusterSummary                  `json:"vulnerable_clusters,omitempty"`
-	VulnerableNamespaces   []NamespaceSummary                `json:"vulnerable_namespaces,omitempty"`
+	TotalReports           int                      `json:"total_reports"`
+	SeverityTotals         SeverityTotals           `json:"severity_totals"`
+	ScanTypesBreakdown     map[string]TypeBreakdown `json:"scan_types_breakdown"`
+	TopVulnerableWorkloads []WorkloadSummary        `json:"top_vulnerable_workloads"`
+	VulnerableClusters     []ClusterSummary         `json:"vulnerable_clusters,omitempty"`
+	VulnerableNamespaces   []NamespaceSummary       `json:"vulnerable_namespaces,omitempty"`
 }
 
 type TrendRecord struct {
@@ -334,25 +334,47 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 	refresh := r.URL.Query().Get("refresh") == "1"
 	emptyKey := "empty:clusters"
 
+	var clusters []Cluster
+	clusterClients := h.clusterReg.All()
+	for name, cc := range clusterClients {
+		cc.mu.RLock()
+		syncState := cc.SyncState
+		cc.mu.RUnlock()
+		if syncState == "" {
+			syncState = "Cached"
+		}
+		clusterInfo := Cluster{
+			Name:        name,
+			Description: fmt.Sprintf("API Server: %s, version: %s", cc.APIServerURL, cc.Version),
+			SyncState:   syncState,
+		}
+		h.cache.Set(clusterKey(clusterInfo.Name), clusterInfo, 0)
+		clusters = append(clusters, clusterInfo)
+	}
+
+	if len(clusters) > 0 {
+		writeJSON(w, http.StatusOK, Response{
+			Code:    CodeSuccess,
+			Message: "Success (k8s)",
+			Data:    clusters,
+		})
+		return
+	}
+
 	if !refresh {
-		var clusters []Cluster
 		items := h.cache.Items()
 		for k, v := range items {
-			if strings.HasPrefix(k, "cluster:") {
-				cluster, ok := convertCacheValue[Cluster](v)
-				if !ok {
-					continue
-				}
-				if cc := h.clusterReg.Get(cluster.Name); cc != nil {
-					cc.mu.RLock()
-					cluster.SyncState = cc.SyncState
-					cc.mu.RUnlock()
-				}
-				if cluster.SyncState == "" {
-					cluster.SyncState = "Cached"
-				}
-				clusters = append(clusters, cluster)
+			if !strings.HasPrefix(k, "cluster:") {
+				continue
 			}
+			cluster, ok := convertCacheValue[Cluster](v)
+			if !ok {
+				continue
+			}
+			if cluster.SyncState == "" {
+				cluster.SyncState = "Cached"
+			}
+			clusters = append(clusters, cluster)
 		}
 		if len(clusters) > 0 {
 			writeJSON(w, http.StatusOK, Response{
@@ -372,36 +394,11 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var clusters []Cluster
-	clusterClients := h.clusterReg.All()
-	for name, cc := range clusterClients {
-		cc.mu.RLock()
-		syncState := cc.SyncState
-		cc.mu.RUnlock()
-		if syncState == "" {
-			syncState = "Cached"
-		}
-		clusterInfo := Cluster{
-			Name:        name,
-			Description: fmt.Sprintf("API Server: %s, version: %s", cc.APIServerURL, cc.Version),
-			SyncState:   syncState,
-		}
-		h.cache.Set(clusterKey(clusterInfo.Name), clusterInfo, 0)
-		clusters = append(clusters, clusterInfo)
-	}
-	if len(clusters) == 0 {
-		h.cache.Set(emptyKey, true, 0)
-		writeJSON(w, http.StatusOK, Response{
-			Code:    CodeSuccess,
-			Message: "Success (k8s empty)",
-			Data:    []Cluster{},
-		})
-		return
-	}
+	h.cache.Set(emptyKey, true, 0)
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
-		Message: "Success (k8s)",
-		Data:    clusters,
+		Message: "Success (k8s empty)",
+		Data:    []Cluster{},
 	})
 }
 
