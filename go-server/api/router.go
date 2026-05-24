@@ -1,8 +1,8 @@
 package api
 
 import (
-	"net/url"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"trivy-ui/config"
@@ -74,6 +74,14 @@ func (r *Router) Setup(staticPath string) {
 		}
 	})
 
+	r.mux.HandleFunc("/api/v1/reports/detail", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet || req.Method == http.MethodOptions {
+			r.handler.GetReportDetails(w, req)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	r.mux.HandleFunc("/api/v1/reports/", func(w http.ResponseWriter, req *http.Request) {
 		path := strings.TrimPrefix(req.URL.Path, "/api/v1/reports/")
 		parts := strings.Split(path, "/")
@@ -106,14 +114,6 @@ func (r *Router) Setup(staticPath string) {
 				return
 			}
 			http.NotFound(w, req)
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	r.mux.HandleFunc("/api/v1/reports/detail", func(w http.ResponseWriter, req *http.Request) {
-		if req.Method == http.MethodGet || req.Method == http.MethodOptions {
-			r.handler.GetReportDetails(w, req)
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}

@@ -341,8 +341,7 @@ func (c *Cache) GetReports(typeName, clusterFilter string, namespaceFilters []st
 			continue
 		}
 
-		if len(namespaceFilters) > 0 {
-			if namespace != "" {
+		if len(namespaceFilters) > 0 && namespace != "" {
 				matched := false
 				for _, nf := range namespaceFilters {
 					if nf == "all" || namespace == nf {
@@ -354,7 +353,6 @@ func (c *Cache) GetReports(typeName, clusterFilter string, namespaceFilters []st
 					continue
 				}
 			}
-		}
 
 		if item, found := c.items[k]; found {
 			if rep, ok := item.Value.(Report); ok {

@@ -122,6 +122,8 @@ type CacheService interface {
 	GetReports(typeName, clusterFilter string, namespaceFilters []string) []Report
 	GetReportCount(reportType, cluster string) (int, int)
 	GetOverviewData(cluster string) *ClusterOverview
+	GetTrends(clusterFilter string, days int) []TrendRecord
+	GetStats() map[string]interface{}
 	Set(key string, value interface{}, expiration time.Duration)
 	Delete(key string)
 	DeleteReportEntry(cluster, namespace, reportType, name string)
@@ -176,6 +178,10 @@ func (c *CacheServiceImpl) GetReportCount(reportType, cluster string) (int, int)
 
 func (c *CacheServiceImpl) GetOverviewData(cluster string) *ClusterOverview {
 	return c.getCache().GetOverviewData(cluster)
+}
+
+func (c *CacheServiceImpl) GetTrends(clusterFilter string, days int) []TrendRecord {
+	return c.getCache().GetTrends(clusterFilter, days)
 }
 
 func (c *CacheServiceImpl) GetStats() map[string]interface{} {
@@ -316,7 +322,7 @@ func (h *Handler) ReadinessCheck(w http.ResponseWriter, r *http.Request) {
 
 // GetCacheStats 获取缓存统计信息
 func (h *Handler) GetCacheStats(w http.ResponseWriter, r *http.Request) {
-	stats := h.cache.(*CacheServiceImpl).GetStats()
+	stats := h.cache.GetStats()
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
 		Message: "Success",
@@ -734,11 +740,9 @@ func (h *Handler) GetOverviewTrends(w http.ResponseWriter, r *http.Request) {
 	if d, err := strconv.Atoi(daysStr); err == nil && d > 0 {
 		days = d
 	}
-	// Currently cache doesn't have GetTrends method. Wait, I should add it to CacheService interface.
-	// Oh, I forgot to add GetTrends to CacheService. I'll do it.
-	var trends []TrendRecord
-	if impl, ok := h.cache.(*CacheServiceImpl); ok {
-		trends = impl.getCache().GetTrends(cluster, days)
+	trends := h.cache.GetTrends(cluster, days)
+	if trends == nil {
+		trends = []TrendRecord{}
 	}
 	writeJSON(w, http.StatusOK, Response{
 		Code: CodeSuccess,

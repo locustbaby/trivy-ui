@@ -34,6 +34,9 @@ func main() {
 		utils.LogWarning("Failed to load cache", map[string]interface{}{"error": err.Error()})
 	}
 
+	cacheSvc := api.NewCacheServiceImpl()
+	clusterRegistry := api.InitDefaultRegistry(cacheSvc)
+
 	hasCache := api.HasCacheData()
 	if hasCache {
 		utils.LogInfo("Cache data found, starting server quickly", map[string]interface{}{
@@ -295,7 +298,7 @@ func main() {
 			log.Fatalf("No Kubernetes client initialized!")
 		}
 	}
-	router := api.NewRouter(firstClient, staticPath, api.NewCacheServiceImpl(), api.GetDefaultRegistry(), config.GetGlobalRegistry())
+	router := api.NewRouter(firstClient, staticPath, cacheSvc, clusterRegistry, config.GetGlobalRegistry())
 	utils.LogInfo("Router created")
 
 	corsHandler := cors.New(cors.Options{

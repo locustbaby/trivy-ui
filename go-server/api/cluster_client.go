@@ -45,6 +45,13 @@ func GetDefaultRegistry() *ClusterRegistry {
 	return defaultRegistry
 }
 
+func InitDefaultRegistry(cacheSvc CacheService) *ClusterRegistry {
+	registryOnce.Do(func() {
+		defaultRegistry = NewClusterRegistry(cacheSvc)
+	})
+	return defaultRegistry
+}
+
 func GetClusterClient(clusterName string) *ClusterClient {
 	return GetDefaultRegistry().Get(clusterName)
 }

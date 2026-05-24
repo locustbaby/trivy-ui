@@ -91,7 +91,7 @@ export function Dashboard() {
     let finalCluster = urlCluster
     let finalType = urlType
 
-    if (!finalCluster && clustersData.length === 1) {
+    if (!finalCluster && clustersData.length > 0) {
       finalCluster = clustersData[0].name
     }
 
