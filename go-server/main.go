@@ -86,29 +86,25 @@ func main() {
 					utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
 					continue
 				}
-				clusterName := ""
-				for name := range rawConfig.Clusters {
-					clusterName = name
-					break
-				}
-				if clusterName == "" {
-					utils.LogInfo("No cluster found in kubeconfig file", map[string]interface{}{"file": file.Name()})
+				if len(rawConfig.Contexts) == 0 {
+					utils.LogInfo("No contexts found in kubeconfig file", map[string]interface{}{"file": file.Name()})
 					continue
 				}
-				if strings.Contains(clusterName, "/") {
-					parts := strings.Split(clusterName, "/")
-					clusterName = parts[len(parts)-1]
-				} else if strings.Contains(clusterName, ":") {
-					parts := strings.Split(clusterName, ":")
-					clusterName = parts[len(parts)-1]
+				contextNames := make([]string, 0, len(rawConfig.Contexts))
+				for name := range rawConfig.Contexts {
+					contextNames = append(contextNames, name)
 				}
-				k8sClient, err := kubernetes.NewClient(path)
-				if err != nil {
-					utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
-					continue
+				sort.Strings(contextNames) // deterministic startup order per file
+				for _, contextName := range contextNames {
+					displayName := contextName
+					if strings.HasPrefix(displayName, "arn:aws:eks:") && strings.Contains(displayName, ":cluster/") {
+						parts := strings.Split(displayName, ":cluster/")
+						if len(parts) == 2 {
+							displayName = parts[1]
+						}
+					}
+					clustersToInit = append(clustersToInit, clusterInfo{displayName, path, contextName})
 				}
-				clustersToInit = append(clustersToInit, clusterInfo{clusterName, path, ""})
-				clients[clusterName] = k8sClient
 			}
 		}
 	}
