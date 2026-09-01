@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +64,7 @@ func main() {
 		kubeconfigDir = "/kubeconfigs"
 	}
 
-	type clusterInfo struct{ Name, Kubeconfig string }
+	type clusterInfo struct{ Name, Kubeconfig, Context string }
 	var clustersToInit []clusterInfo
 
 	if kubeconfigDir != "" {
@@ -106,13 +107,13 @@ func main() {
 					utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
 					continue
 				}
-				clustersToInit = append(clustersToInit, clusterInfo{clusterName, path})
+				clustersToInit = append(clustersToInit, clusterInfo{clusterName, path, ""})
 				clients[clusterName] = k8sClient
 			}
 		}
 	}
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-		clustersToInit = append(clustersToInit, clusterInfo{"incluster", ""})
+		clustersToInit = append(clustersToInit, clusterInfo{"incluster", "", ""})
 	}
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
@@ -121,21 +122,26 @@ func main() {
 	}
 	if _, err := os.Stat(kubeconfig); err == nil {
 		if rawConfig, err := clientcmd.LoadFromFile(kubeconfig); err == nil {
-			contextName := rawConfig.CurrentContext
-			if contextName != "" {
-				if strings.HasPrefix(contextName, "arn:aws:eks:") && strings.Contains(contextName, ":cluster/") {
-					parts := strings.Split(contextName, ":cluster/")
+			contextNames := make([]string, 0, len(rawConfig.Contexts))
+			for name := range rawConfig.Contexts {
+				contextNames = append(contextNames, name)
+			}
+			sort.Strings(contextNames) // deterministic first-cluster + stable startup order
+			for _, contextName := range contextNames {
+				displayName := contextName
+				if strings.HasPrefix(displayName, "arn:aws:eks:") && strings.Contains(displayName, ":cluster/") {
+					parts := strings.Split(displayName, ":cluster/")
 					if len(parts) == 2 {
-						contextName = parts[1]
+						displayName = parts[1]
 					}
 				}
-				clustersToInit = append(clustersToInit, clusterInfo{contextName, kubeconfig})
+				clustersToInit = append(clustersToInit, clusterInfo{displayName, kubeconfig, contextName})
 			}
 		}
 	}
 
 	initCluster := func(c clusterInfo) *kubernetes.Client {
-		k8sClient, err := kubernetes.NewClient(c.Kubeconfig)
+		k8sClient, err := kubernetes.NewClientWithContext(c.Kubeconfig, c.Context, kubernetes.DefaultClientConfig())
 		if err != nil {
 			utils.LogWarning("Failed to create Kubernetes client", map[string]interface{}{"cluster": c.Name, "error": err.Error()})
 			return nil
@@ -163,7 +169,7 @@ func main() {
 		}
 
 		first := clustersToInit[0]
-		firstClient, err := kubernetes.NewClient(first.Kubeconfig)
+		firstClient, err := kubernetes.NewClientWithContext(first.Kubeconfig, first.Context, kubernetes.DefaultClientConfig())
 		if err != nil {
 			utils.LogWarning("Failed to create Kubernetes client", map[string]interface{}{"cluster": first.Name, "error": err.Error()})
 		} else {
