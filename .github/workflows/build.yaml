@@ -96,8 +96,11 @@ jobs:
 
     env:
       KWOK_VERSION: v0.7.0
-      KWOK_KUBE_VERSION: v1.30.10
-      KWOK_CLUSTER: trivy-ui-e2e
+      KWOK_CLUSTER_A: trivy-ui-e2e-a
+      KWOK_CLUSTER_B: trivy-ui-e2e-b
+      KWOK_KUBE_VERSION_A: v1.30.10
+      KWOK_KUBE_VERSION_B: v1.31.6
+      E2E_CONTEXTS: trivy-ui-e2e-a,trivy-ui-e2e-b
       E2E_BASE_URL: http://127.0.0.1:8099
 
     steps:
@@ -119,27 +122,42 @@ jobs:
 
       - name: Create kwok cluster (real kube-apiserver + etcd)
         run: |
-          kwokctl create cluster --name "$KWOK_CLUSTER" \
+          KWOK_KUBE_VERSION="$KWOK_KUBE_VERSION_A" kwokctl create cluster --name "$KWOK_CLUSTER_A" \
+            --runtime docker --timeout 5m
+          KWOK_KUBE_VERSION="$KWOK_KUBE_VERSION_B" kwokctl create cluster --name "$KWOK_CLUSTER_B" \
             --runtime docker --timeout 5m
           # The kubeconfig under ~/.kwok references cert paths that only exist
           # inside the apiserver container; `get kubeconfig` emits a host-usable
           # one (rewritten cert paths + server address).
-          kwokctl get kubeconfig --name "$KWOK_CLUSTER" > /tmp/kwok-kubeconfig.yaml
+          kwokctl get kubeconfig --name "$KWOK_CLUSTER_A" > /tmp/kwok-kubeconfig-a.yaml
+          kwokctl get kubeconfig --name "$KWOK_CLUSTER_B" > /tmp/kwok-kubeconfig-b.yaml
+          wait_for_api() {
+            local config="$1"
+            local cluster="$2"
+            for i in $(seq 1 60); do
+              if KUBECONFIG="$config" kubectl get --raw=/readyz >/dev/null 2>&1; then
+                echo "Kubernetes API ready: $cluster"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::Kubernetes API did not become ready: $cluster"
+            KUBECONFIG="$config" kubectl get --raw=/readyz || true
+            return 1
+          }
+          wait_for_api /tmp/kwok-kubeconfig-a.yaml "$KWOK_CLUSTER_A"
+          wait_for_api /tmp/kwok-kubeconfig-b.yaml "$KWOK_CLUSTER_B"
+          KUBECONFIG=/tmp/kwok-kubeconfig-a.yaml:/tmp/kwok-kubeconfig-b.yaml \
+            kubectl config view --flatten --merge > /tmp/kwok-kubeconfig.yaml
+          KUBECONFIG=/tmp/kwok-kubeconfig.yaml kubectl config use-context "$KWOK_CLUSTER_A"
           echo "KUBECONFIG=/tmp/kwok-kubeconfig.yaml" >> "$GITHUB_ENV"
-          for i in $(seq 1 60); do
-            if kubectl get --raw=/readyz >/dev/null 2>&1; then
-              echo "Kubernetes API ready"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::Kubernetes API did not become ready"
-          kubectl get --raw=/readyz || true
-          docker ps -a
-          exit 1
+          echo "E2E_CONTEXTS=$E2E_CONTEXTS" >> "$GITHUB_ENV"
 
       - name: Apply Trivy Operator CRDs
-        run: kubectl apply -f go-server/test/e2e/fixtures/crds.yaml
+        run: |
+          for config in /tmp/kwok-kubeconfig-a.yaml /tmp/kwok-kubeconfig-b.yaml; do
+            KUBECONFIG="$config" kubectl apply -f go-server/test/e2e/fixtures/crds.yaml
+          done
 
       - name: Build server binary
         working-directory: go-server
@@ -177,8 +195,11 @@ jobs:
           echo "=== server log ==="
           tail -200 /tmp/trivy-ui-server.log || true
           echo "=== seeded CR counts ==="
-          for r in vulnerabilityreports configauditreports exposedsecretreports clustervulnerabilityreports; do
-            echo -n "$r: "; kubectl get "$r" -A --no-headers 2>/dev/null | wc -l || true
+          for config in /tmp/kwok-kubeconfig-a.yaml /tmp/kwok-kubeconfig-b.yaml; do
+            echo "-- $config --"
+            for r in vulnerabilityreports configauditreports exposedsecretreports clustervulnerabilityreports; do
+              echo -n "$r: "; KUBECONFIG="$config" kubectl get "$r" -A --no-headers 2>/dev/null | wc -l || true
+            done
           done
           echo "=== clusters ==="
           curl -s "$E2E_BASE_URL/api/v1/clusters" | head -c 2000 || true
@@ -188,7 +209,9 @@ jobs:
 
       - name: Teardown kwok cluster
         if: always()
-        run: kwokctl delete cluster --name "$KWOK_CLUSTER" || true
+        run: |
+          kwokctl delete cluster --name "$KWOK_CLUSTER_A" || true
+          kwokctl delete cluster --name "$KWOK_CLUSTER_B" || true
 
   build-and-scan:
     runs-on: ubuntu-latest

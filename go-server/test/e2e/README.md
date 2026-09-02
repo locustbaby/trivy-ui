@@ -1,7 +1,7 @@
 # E2E Tests (kwok)
 
-End-to-end tests that run the real `trivy-ui` server against a
-[kwok](https://kwok.sigs.k8s.io)-provisioned cluster. kwokctl starts a **real
+End-to-end tests that run the real `trivy-ui` server against
+[kwok](https://kwok.sigs.k8s.io)-provisioned clusters. kwokctl starts a **real
 kube-apiserver + etcd** locally, so CRD discovery, informer watches, list/apply
 semantics and dynamic-client reads all behave exactly like production — only
 the nodes are fake.
@@ -33,6 +33,10 @@ asserts:
   → `400 VALIDATION_FAILED`, invalid paging params degrade to safe defaults.
 - **Live updates**: creating a CR via the dynamic client makes it appear
   through the informer watch within seconds; deleting it removes it.
+- **Multi-cluster isolation and aggregation**: CI starts two clusters using
+  different Kubernetes versions, seeds different report names and values into
+  each, then compares per-cluster lists/overviews and the global totals with
+  ground truth read directly from each API server.
 
 ## Running locally
 
@@ -61,5 +65,6 @@ kwokctl delete cluster --name trivy-ui-e2e
 ```
 
 CI runs the same steps automatically in the `e2e-kwok` job of
-`.github/workflows/build.yaml`. The suite is behind the `e2e` build tag so it
+`.github/workflows/build.yaml`; CI additionally merges two KWOK kubeconfig
+contexts and sets `E2E_CONTEXTS`. The suite is behind the `e2e` build tag so it
 never runs under plain `go test ./...`.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 )
 
 // ---------------------------------------------------------------------------
@@ -115,7 +117,7 @@ func walkAllPages(t testing.TB, typeName string, pageSize int) (listData, []stri
 			t.Fatalf("%s page %d: hasNext=%v, want %v (total=%d)", typeName, page, data.HasNext, wantHasNext, data.Total)
 		}
 		for _, item := range data.Data {
-			key := item.Namespace + "/" + item.Name
+			key := item.Cluster + "/" + item.Namespace + "/" + item.Name
 			all = append(all, key)
 		}
 		if !data.HasNext {
@@ -142,6 +144,20 @@ type groundTruth struct {
 	clusterName string
 }
 
+func (gt groundTruth) byCluster(clusterName string) []seededReport {
+	var out []seededReport
+	for _, report := range gt.reports {
+		if report.ref.Cluster == clusterName {
+			out = append(out, report)
+		}
+	}
+	return out
+}
+
+func (gt groundTruth) totalsForCluster(clusterName string) (int, map[string]int) {
+	return (groundTruth{reports: gt.byCluster(clusterName)}).totals()
+}
+
 func countKey(summary interface{}) map[string]int {
 	counts := make(map[string]int)
 	m, ok := summary.(map[string]interface{})
@@ -163,17 +179,13 @@ func countKey(summary interface{}) map[string]int {
 
 func loadGroundTruth(t testing.TB) groundTruth {
 	t.Helper()
-	dc, err := dynamicClientFromEnv()
-	if err != nil {
-		t.Fatalf("dynamic client: %v", err)
-	}
 	set := gvrs()
 	ctx := context.Background()
 	gt := groundTruth{}
 
-	listNamespaced := func(resource, typ string) {
+	listNamespaced := func(dc dynamic.Interface, clusterName, resource, typ string) {
 		var items *unstructured.UnstructuredList
-		items, err = dc.Resource(set.byName(resource)).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+		items, err := dc.Resource(set.byName(resource)).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			t.Fatalf("list %s from apiserver: %v", resource, err)
 		}
@@ -185,6 +197,7 @@ func loadGroundTruth(t testing.TB) groundTruth {
 			}
 			gt.reports = append(gt.reports, seededReport{
 				ref: reportRef{
+					Cluster:   clusterName,
 					Namespace: item.GetNamespace(),
 					Name:      item.GetName(),
 					Type:      typ,
@@ -194,25 +207,31 @@ func loadGroundTruth(t testing.TB) groundTruth {
 			})
 		}
 	}
-	listNamespaced("vulnerabilityreports", "vulnerabilityreports")
-	listNamespaced("configauditreports", "configauditreports")
-	listNamespaced("exposedsecretreports", "exposedsecretreports")
-
-	clusterItems, err := dc.Resource(set.byName("clustervulnerabilityreports")).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("list clustervulnerabilityreports from apiserver: %v", err)
-	}
-	for _, item := range clusterItems.Items {
-		s := item.UnstructuredContent()["report"]
-		var raw interface{}
-		if m, ok := s.(map[string]interface{}); ok {
-			raw = m["summary"]
+	for _, contextName := range e2eContexts() {
+		dc, err := dynamicClientForContext(contextName)
+		if err != nil {
+			t.Fatalf("dynamic client for %s: %v", contextName, err)
 		}
-		gt.reports = append(gt.reports, seededReport{
-			ref:        reportRef{Namespace: "", Name: item.GetName(), Type: "clustervulnerabilityreports"},
-			summary:    countKey(raw),
-			hasSummary: raw != nil,
-		})
+		listNamespaced(dc, contextName, "vulnerabilityreports", "vulnerabilityreports")
+		listNamespaced(dc, contextName, "configauditreports", "configauditreports")
+		listNamespaced(dc, contextName, "exposedsecretreports", "exposedsecretreports")
+
+		clusterItems, err := dc.Resource(set.byName("clustervulnerabilityreports")).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			t.Fatalf("list clustervulnerabilityreports from %s: %v", contextName, err)
+		}
+		for _, item := range clusterItems.Items {
+			s := item.UnstructuredContent()["report"]
+			var raw interface{}
+			if m, ok := s.(map[string]interface{}); ok {
+				raw = m["summary"]
+			}
+			gt.reports = append(gt.reports, seededReport{
+				ref:        reportRef{Cluster: contextName, Namespace: "", Name: item.GetName(), Type: "clustervulnerabilityreports"},
+				summary:    countKey(raw),
+				hasSummary: raw != nil,
+			})
+		}
 	}
 
 	env := expectOK(t, "/api/v1/clusters")
@@ -220,8 +239,8 @@ func loadGroundTruth(t testing.TB) groundTruth {
 	if err := json.Unmarshal(env.Data, &clusters); err != nil {
 		t.Fatalf("decode clusters: %v (%s)", err, string(env.Data))
 	}
-	if len(clusters) == 0 {
-		t.Fatal("no clusters reported by trivy-ui")
+	if len(clusters) != len(e2eContexts()) {
+		t.Fatalf("trivy-ui reported %d clusters, want %d: %+v", len(clusters), len(e2eContexts()), clusters)
 	}
 	gt.clusterName = clusters[0].Name
 	return gt
@@ -279,15 +298,30 @@ func TestClustersDiscoveredAndSynced(t *testing.T) {
 	if err := json.Unmarshal(env.Data, &clusters); err != nil {
 		t.Fatalf("decode clusters: %v", err)
 	}
-	found := false
-	for _, c := range clusters {
-		if c.DataComplete && c.SyncState != "" {
-			found = true
-			t.Logf("cluster %q syncState=%q", c.Name, c.SyncState)
-		}
+	want := make(map[string]bool, len(e2eContexts()))
+	for _, contextName := range e2eContexts() {
+		want[contextName] = true
 	}
-	if !found {
-		t.Fatalf("expected at least one complete cluster, got %+v", clusters)
+	for _, c := range clusters {
+		if !want[c.Name] {
+			t.Errorf("unexpected cluster %q, want contexts %v", c.Name, e2eContexts())
+		}
+		if !c.DataComplete || c.SyncState == "" {
+			t.Errorf("cluster %q is not complete: %+v", c.Name, c)
+		}
+		t.Logf("cluster %q syncState=%q", c.Name, c.SyncState)
+	}
+	for contextName := range want {
+		found := false
+		for _, c := range clusters {
+			if c.Name == contextName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected cluster %q, got %+v", contextName, clusters)
+		}
 	}
 }
 
@@ -392,11 +426,85 @@ func TestOrderStableAcrossRefreshesAndPageSizes(t *testing.T) {
 	}
 
 	// Sorted output must equal lexicographic sort of the sort keys we can
-	// derive (namespace/name within one cluster and type).
+	// derive (cluster/namespace/name).
 	sorted := append([]string(nil), run1...)
 	sort.Strings(sorted)
 	if fmt.Sprint(sorted) != fmt.Sprint(run1) {
 		t.Fatalf("%s: sequence not globally sorted:\n%v\nvs\n%v", typ, run1, sorted)
+	}
+}
+
+func TestMultiClusterDataIsolatedAndAggregated(t *testing.T) {
+	contexts := e2eContexts()
+	if len(contexts) < 2 {
+		t.Skip("E2E_CONTEXTS has fewer than two contexts")
+	}
+	gt := loadGroundTruth(t)
+
+	globalTotal, globalSeverity := gt.totals()
+	summedTotal := 0
+	summedSeverity := map[string]int{"critical": 0, "high": 0, "medium": 0, "low": 0}
+	firstNames := make(map[string]struct{})
+	for _, report := range gt.byCluster(contexts[0]) {
+		firstNames[report.ref.Type+"/"+report.ref.Name] = struct{}{}
+	}
+	for _, clusterName := range contexts {
+		clusterReports := gt.byCluster(clusterName)
+		clusterTotal, clusterSeverity := gt.totalsForCluster(clusterName)
+		if len(clusterReports) == 0 {
+			t.Fatalf("no ground-truth reports for cluster %q", clusterName)
+		}
+		if clusterName != contexts[0] {
+			sharedNames := 0
+			for _, report := range clusterReports {
+				if _, ok := firstNames[report.ref.Type+"/"+report.ref.Name]; ok {
+					sharedNames++
+				}
+			}
+			if sharedNames != 0 {
+				t.Errorf("clusters %s and %s unexpectedly share %d seeded report names", contexts[0], clusterName, sharedNames)
+			}
+		}
+		summedTotal += clusterTotal
+		for severity, count := range clusterSeverity {
+			summedSeverity[severity] += count
+		}
+
+		for _, typ := range allTypes {
+			want := 0
+			for _, report := range clusterReports {
+				if report.ref.Type == typ {
+					want++
+				}
+			}
+			path := fmt.Sprintf("/api/v1/reports?type=%s&cluster=%s&pageSize=2000", typ, url.QueryEscape(clusterName))
+			data := decodeList(t, expectOK(t, path))
+			if data.Total != want {
+				t.Errorf("cluster %s type %s total=%d, want %d", clusterName, typ, data.Total, want)
+			}
+			for _, item := range data.Data {
+				if item.Cluster != clusterName {
+					t.Errorf("cluster filter %s returned report from %s", clusterName, item.Cluster)
+				}
+			}
+		}
+
+		var overview overviewData
+		env := expectOK(t, "/api/v1/overview?cluster="+url.QueryEscape(clusterName))
+		if err := json.Unmarshal(env.Data, &overview); err != nil {
+			t.Fatalf("decode overview for %s: %v", clusterName, err)
+		}
+		if overview.TotalReports != clusterTotal {
+			t.Errorf("cluster %s overview total=%d, want %d", clusterName, overview.TotalReports, clusterTotal)
+		}
+		for severity, want := range clusterSeverity {
+			if got := overview.SeverityTotals[severity]; got != want {
+				t.Errorf("cluster %s severity %s=%d, want %d", clusterName, severity, got, want)
+			}
+		}
+	}
+	if summedTotal != globalTotal || fmt.Sprint(summedSeverity) != fmt.Sprint(globalSeverity) {
+		t.Fatalf("per-cluster ground truth does not sum to global ground truth: clusters=%d/%v global=%d/%v", summedTotal, summedSeverity, globalTotal, globalSeverity)
 	}
 }
 
@@ -522,7 +630,7 @@ func TestDetailEndpointReturnsCRContent(t *testing.T) {
 	}
 
 	path := fmt.Sprintf("/api/v1/reports/%s/%s/%s/%s",
-		gt.clusterName, target.ref.Type, target.ref.Namespace, target.ref.Name)
+		target.ref.Cluster, target.ref.Type, target.ref.Namespace, target.ref.Name)
 	env := expectOK(t, path)
 	raw, _ := json.Marshal(env.Data)
 	var detail struct {
@@ -560,7 +668,7 @@ func TestClusterScopedDetailEndpointReturnsCRContent(t *testing.T) {
 	}
 
 	path := fmt.Sprintf("/api/v1/reports/%s/%s/_/%s",
-		gt.clusterName, target.ref.Type, target.ref.Name)
+		target.ref.Cluster, target.ref.Type, target.ref.Name)
 	env := expectOK(t, path)
 	raw, _ := json.Marshal(env.Data)
 	var detail struct {

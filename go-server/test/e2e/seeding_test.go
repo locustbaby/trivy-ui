@@ -9,6 +9,7 @@
 //
 //	E2E_BASE_URL  - base URL of a running trivy-ui server (default http://127.0.0.1:8099)
 //	KUBECONFIG    - kubeconfig pointing at the kwok cluster (default ~/.kube/config)
+//	E2E_CONTEXTS  - comma-separated kubeconfig contexts to seed (default current context)
 package e2e
 
 import (
@@ -17,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +72,7 @@ func TestMain(m *testing.M) {
 // waitForConvergence polls the list endpoint until every seeded
 // vulnerabilityreport is visible, which implies all informers have caught up.
 func waitForConvergence(timeout time.Duration) error {
-	want := len(namespaces) * vulnsPerNamespace
+	want := len(e2eContexts()) * len(namespaces) * vulnsPerNamespace
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		resp, err := e2eHTTPClient.Get(baseURL + "/api/v1/reports?type=vulnerabilityreports&pageSize=1")
@@ -96,6 +98,33 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func e2eContexts() []string {
+	if raw := strings.TrimSpace(os.Getenv("E2E_CONTEXTS")); raw != "" {
+		seen := make(map[string]struct{})
+		contexts := make([]string, 0)
+		for _, value := range strings.Split(raw, ",") {
+			contextName := strings.TrimSpace(value)
+			if contextName == "" {
+				continue
+			}
+			if _, ok := seen[contextName]; ok {
+				continue
+			}
+			seen[contextName] = struct{}{}
+			contexts = append(contexts, contextName)
+		}
+		if len(contexts) > 0 {
+			return contexts
+		}
+	}
+
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if rawConfig, err := loadingRules.GetStartingConfig(); err == nil && rawConfig.CurrentContext != "" {
+		return []string{rawConfig.CurrentContext}
+	}
+	return []string{""}
 }
 
 func waitForReady(ctx context.Context) error {
@@ -138,9 +167,17 @@ func gvrs() gvrSet {
 	}
 }
 
-func kubeConfig() (*rest.Config, error) {
+func kubeConfigForContext(contextName string) (*rest.Config, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if contextName != "" {
+		overrides := &clientcmd.ConfigOverrides{CurrentContext: contextName}
+		return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
+	}
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, nil).ClientConfig()
+}
+
+func kubeConfig() (*rest.Config, error) {
+	return kubeConfigForContext(e2eContexts()[0])
 }
 
 func (s gvrSet) byName(resource string) schema.GroupVersionResource {
@@ -165,10 +202,26 @@ func dynamicClientFromEnv() (dynamic.Interface, error) {
 	return dynamic.NewForConfig(config)
 }
 
+func dynamicClientForContext(contextName string) (dynamic.Interface, error) {
+	config, err := kubeConfigForContext(contextName)
+	if err != nil {
+		return nil, fmt.Errorf("build kubeconfig for %s: %w", contextName, err)
+	}
+	return dynamic.NewForConfig(config)
+}
+
 func clientsetFromEnv() (*kubernetes.Clientset, error) {
 	config, err := kubeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("build kubeconfig: %w", err)
+	}
+	return kubernetes.NewForConfig(config)
+}
+
+func clientsetForContext(contextName string) (*kubernetes.Clientset, error) {
+	config, err := kubeConfigForContext(contextName)
+	if err != nil {
+		return nil, fmt.Errorf("build kubeconfig for %s: %w", contextName, err)
 	}
 	return kubernetes.NewForConfig(config)
 }
@@ -298,7 +351,16 @@ func workloadName(prefix string, nsIdx, i int) string {
 // Edge cases are mixed into every type: clean reports, reports without a
 // summary section and reports with an empty result set.
 func seedAll(ctx context.Context) error {
-	cs, err := clientsetFromEnv()
+	for clusterIndex, contextName := range e2eContexts() {
+		if err := seedCluster(ctx, contextName, clusterIndex); err != nil {
+			return fmt.Errorf("seed cluster %s: %w", contextName, err)
+		}
+	}
+	return nil
+}
+
+func seedCluster(ctx context.Context, contextName string, clusterIndex int) error {
+	cs, err := clientsetForContext(contextName)
 	if err != nil {
 		return err
 	}
@@ -310,11 +372,14 @@ func seedAll(ctx context.Context) error {
 		}
 	}
 
-	dc, err := dynamicClientFromEnv()
+	dc, err := dynamicClientForContext(contextName)
 	if err != nil {
 		return err
 	}
 	set := gvrs()
+	seedOffset := clusterIndex * 1000
+	namePrefix := fmt.Sprintf("cluster-%d-", clusterIndex)
+	seedName := func(name string) string { return namePrefix + name }
 
 	// Idempotency: drop everything seeded by a previous run first.
 	if err := deleteAllSeeded(ctx, dc, set); err != nil {
@@ -323,20 +388,20 @@ func seedAll(ctx context.Context) error {
 
 	for nsIdx, ns := range namespaces {
 		for i := 0; i < vulnsPerNamespace; i++ {
-			counts := countsForIndex(i + nsIdx)
-			payload := reportEnvelope("vuln", i, summaryMap(counts), []interface{}{map[string]interface{}{
-				"target":          fmt.Sprintf("%s (debian 12.2)", repositories[i%len(repositories)]),
+			counts := countsForIndex(i + nsIdx + seedOffset)
+			payload := reportEnvelope("vuln", i+seedOffset, summaryMap(counts), []interface{}{map[string]interface{}{
+				"target":          fmt.Sprintf("%s (debian %d.%d)", repositories[i%len(repositories)], 12+clusterIndex, i%3),
 				"class":           "os-pkgs",
 				"type":            "debian",
-				"vulnerabilities": vulnArray(counts, i+nsIdx*100),
+				"vulnerabilities": vulnArray(counts, i+nsIdx*100+seedOffset),
 			}})
-			name := workloadName("vuln", nsIdx, i) + "-report"
+			name := seedName(workloadName("vuln", nsIdx, i) + "-report")
 			if _, err := dc.Resource(set.Vulns).Namespace(ns).Create(ctx, cr(group+"/v1alpha1", "VulnerabilityReport", name, ns, payload), metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("create vuln %s/%s: %w", ns, name, err)
 			}
 		}
 		for i := 0; i < configAuditPerNS; i++ {
-			counts := countsForIndex(i + nsIdx + 5)
+			counts := countsForIndex(i + nsIdx + 5 + seedOffset)
 			checks := make([]interface{}, 0, counts.total())
 			appendCheck := func(n int, severity string) {
 				for j := 0; j < n; j++ {
@@ -356,7 +421,7 @@ func seedAll(ctx context.Context) error {
 			appendCheck(counts.medium, "MEDIUM")
 			appendCheck(counts.low, "LOW")
 			successes := 8
-			payload := reportEnvelope("configaudit", i, map[string]interface{}{
+			payload := reportEnvelope("configaudit", i+seedOffset, map[string]interface{}{
 				"criticalCount": counts.critical,
 				"highCount":     counts.high,
 				"mediumCount":   counts.medium,
@@ -367,13 +432,13 @@ func seedAll(ctx context.Context) error {
 				"target": fmt.Sprintf("deployment/%s", workloadName("ca", nsIdx, i)),
 				"checks": checks,
 			}})
-			name := workloadName("ca", nsIdx, i) + "-config-report"
+			name := seedName(workloadName("ca", nsIdx, i) + "-config-report")
 			if _, err := dc.Resource(set.ConfigAudit).Namespace(ns).Create(ctx, cr(group+"/v1alpha1", "ConfigAuditReport", name, ns, payload), metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("create configaudit %s/%s: %w", ns, name, err)
 			}
 		}
 		for i := 0; i < secretsPerNS; i++ {
-			counts := countsForIndex(i + nsIdx + 11)
+			counts := countsForIndex(i + nsIdx + 11 + seedOffset)
 			secrets := make([]interface{}, 0, counts.total())
 			appendSecret := func(n int, severity string) {
 				for j := 0; j < n; j++ {
@@ -391,25 +456,25 @@ func seedAll(ctx context.Context) error {
 			appendSecret(counts.high, "HIGH")
 			appendSecret(counts.medium, "MEDIUM")
 			appendSecret(counts.low, "LOW")
-			payload := reportEnvelope("secret", i, summaryMap(counts), []interface{}{map[string]interface{}{
+			payload := reportEnvelope("secret", i+seedOffset, summaryMap(counts), []interface{}{map[string]interface{}{
 				"target":  "requirements.txt",
 				"secrets": secrets,
 			}})
-			name := workloadName("sec", nsIdx, i) + "-secret-report"
+			name := seedName(workloadName("sec", nsIdx, i) + "-secret-report")
 			if _, err := dc.Resource(set.Secrets).Namespace(ns).Create(ctx, cr(group+"/v1alpha1", "ExposedSecretReport", name, ns, payload), metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("create secret %s/%s: %w", ns, name, err)
 			}
 		}
 	}
 	for i := 0; i < clusterVulnCount; i++ {
-		counts := countsForIndex(i + 23)
-		payload := reportEnvelope("clustervuln", i, summaryMap(counts), []interface{}{map[string]interface{}{
-			"target":          fmt.Sprintf("cluster-policy-%d", i),
+		counts := countsForIndex(i + 23 + seedOffset)
+		payload := reportEnvelope("clustervuln", i+seedOffset, summaryMap(counts), []interface{}{map[string]interface{}{
+			"target":          fmt.Sprintf("cluster-policy-%d-%d", clusterIndex, i),
 			"class":           "os-pkgs",
 			"type":            "debian",
-			"vulnerabilities": vulnArray(counts, i+700),
+			"vulnerabilities": vulnArray(counts, i+700+seedOffset),
 		}})
-		name := fmt.Sprintf("cluster-vuln-report-%03d", i)
+		name := seedName(fmt.Sprintf("cluster-vuln-report-%03d", i))
 		if _, err := dc.Resource(set.ClusterVulns).Create(ctx, cr(group+"/v1alpha1", "ClusterVulnerabilityReport", name, "", payload), metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("create clustervuln %s: %w", name, err)
 		}

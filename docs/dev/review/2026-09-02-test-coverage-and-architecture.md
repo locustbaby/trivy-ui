@@ -10,7 +10,7 @@
 
 ## CI 与交付边界
 
-- kwok 创建完成不代表 Kubernetes API 的 post-start hook 已 ready。E2E 固定到 KWOK v0.7.0 提供的 Kubernetes `v1.30.10`，并轮询 `/readyz` 后才应用 CRD，避免 API server 初始化竞态。
+- kwok 创建完成不代表 Kubernetes API 的 post-start hook 已 ready。E2E 创建两个 cluster，分别使用 KWOK v0.7.0 提供的 Kubernetes `v1.30.10` 和 `v1.31.6`，逐个轮询 `/readyz` 后才应用 CRD，避免 API server 初始化竞态。
 - Helm 渲染检查覆盖默认 RBAC、关闭 chart RBAC、关闭受限缓存卷以及自定义缓存挂载路径。`DATA_PATH` 由 Chart 统一推导，避免环境变量与 volume mount 不一致。
 - amd64 镜像在漏洞扫描后以只读根文件系统运行 `hash-password` smoke test，验证最终镜像中的服务二进制可执行。
 - OCI Chart 仅发布到 Docker Hub，并且只在 GitHub Release 发布后（或手动 dispatch）运行，不会在普通 `main` push 时绕过测试流水线。
@@ -78,7 +78,7 @@ kwok E2E 会种入 40 个 `ClusterVulnerabilityReport`，并验证：
 | Informer create/delete 实时同步 | 部分 | 有 | 已覆盖 |
 | 缓存容量、持久化、stale 读取、目录缺失 | 有 | 无 | 关键 Unit 已有，恢复兼容场景仍少 |
 | Helm RBAC、认证/CORS、缓存挂载与渲染 | Render check | 无 | 已覆盖默认和主要配置组合 |
-| 多 Cluster 来源与部分来源失败 | 部分 | 无 | 待补 |
+| 多 Cluster 来源、隔离与合并统计 | 有 | 有 | 已覆盖两个不同版本的 KWOK cluster |
 | Kubernetes RBAC 拒绝 `list/watch/get` | 无 | 无 | 待补 |
 | 跨站浏览器登录与 Cookie 发送 | Cookie Unit | 无 | 待补真实浏览器验证 |
 | Dashboard 交互（筛选、详情、切换、错误页） | 无 | 无 | 待建立前端测试基础设施 |
@@ -89,7 +89,6 @@ kwok E2E 会种入 40 个 `ClusterVulnerabilityReport`，并验证：
 
 1. 浏览器 E2E：不同 site 的 frontend 与 API，验证登录响应能写入 Cookie、后续请求携带 Cookie、logout 能删除 Cookie。Go 的 `httptest` 不能代表浏览器 SameSite 行为。
 2. Kubernetes RBAC E2E：分别缺少 `list/watch/get` 权限，验证 readiness、sync state、API 错误码和 UI 错误页行为。
-3. 多 Cluster E2E：至少两个 API server / kubeconfig source，覆盖相同 Namespace 与 Report 名称、部分 Cluster 不可用和 scope 交集。
 
 ### P2：近期迭代
 
