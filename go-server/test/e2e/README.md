@@ -38,7 +38,7 @@ asserts:
 
 ```bash
 # 1. Create a kwok cluster (requires Docker; kwok downloads apiserver/etcd)
-kwokctl create cluster --name trivy-ui-e2e --kube-version v1.30.4
+KWOK_KUBE_VERSION=v1.30.10 kwokctl create cluster --name trivy-ui-e2e
 
 # 2. Point kubectl at it
 kubectl config view --raw --minify --flatten > /tmp/kwok-kubeconfig.yaml
