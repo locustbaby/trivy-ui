@@ -50,42 +50,45 @@ func DefaultClientConfig() ClientConfig {
 }
 
 func NewClient(kubeconfig string) (*Client, error) {
-	return NewClientWithConfig(kubeconfig, DefaultClientConfig())
+	return NewClientWithContext(kubeconfig, "", DefaultClientConfig())
 }
 
-func NewClientWithConfig(kubeconfig string, clientConfig ClientConfig) (*Client, error) {
+// NewClientWithContext builds a Kubernetes client for the named context within a
+// kubeconfig file. An empty contextName means the file's current context.
+func NewClientWithContext(kubeconfig string, contextName string, clientConfig ClientConfig) (*Client, error) {
 	var config *rest.Config
 	var err error
-	var clusterName string
-	var contextName string
 
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		config, err = rest.InClusterConfig()
-		clusterName = "incluster"
-	} else {
-		if kubeconfig == "" {
-			home := homedir.HomeDir()
-			kubeconfig = filepath.Join(home, ".kube", "config")
+		if err != nil {
+			return nil, err
 		}
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if err == nil {
-
-			if rawConfig, err2 := clientcmd.LoadFromFile(kubeconfig); err2 == nil {
-				contextName = rawConfig.CurrentContext
-				if contextName != "" {
-					clusterName = contextName
-				}
-			}
-		}
-		if clusterName == "" {
-			clusterName = "default"
-		}
+		return newClientFromConfig(config, clientConfig)
 	}
 
+	if kubeconfig == "" {
+		home := homedir.HomeDir()
+		kubeconfig = filepath.Join(home, ".kube", "config")
+	}
+
+	rawConfig, loadErr := clientcmd.LoadFromFile(kubeconfig)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if contextName == "" {
+		contextName = rawConfig.CurrentContext
+	}
+
+	config, err = clientcmd.NewDefaultClientConfig(*rawConfig, &clientcmd.ConfigOverrides{CurrentContext: contextName}).ClientConfig()
 	if err != nil {
 		return nil, err
 	}
 
+	return newClientFromConfig(config, clientConfig)
+}
+
+func newClientFromConfig(config *rest.Config, clientConfig ClientConfig) (*Client, error) {
 	// Apply rate limiting settings
 	// Note: We don't set config.Timeout globally as it breaks Watch (long-running connections)
 	// Individual requests should use context.WithTimeout instead
