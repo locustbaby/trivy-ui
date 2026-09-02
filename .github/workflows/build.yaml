@@ -96,7 +96,7 @@ jobs:
 
     env:
       KWOK_VERSION: v0.7.0
-      KWOK_KUBERNETES_VERSION: v1.30.4
+      KWOK_KUBE_VERSION: v1.30.4
       KWOK_CLUSTER: trivy-ui-e2e
       E2E_BASE_URL: http://127.0.0.1:8099
 
@@ -120,7 +120,7 @@ jobs:
       - name: Create kwok cluster (real kube-apiserver + etcd)
         run: |
           kwokctl create cluster --name "$KWOK_CLUSTER" \
-            --runtime docker --kube-version "$KWOK_KUBERNETES_VERSION" --timeout 5m
+            --runtime docker --timeout 5m
           # The kubeconfig under ~/.kwok references cert paths that only exist
           # inside the apiserver container; `get kubeconfig` emits a host-usable
           # one (rewritten cert paths + server address).
