@@ -8,6 +8,13 @@
 
 当前分层是清楚的：`auth` 负责 Dashboard 用户身份与 scope，`dataaccess` 负责采集来源边界，`kubernetes` 负责 Kubernetes 访问，`config` 负责 CRD 能力发现，`api` 负责 HTTP 编排。v0.0.5 的功能正确性有 Unit、race 和 kwok E2E 保护；主要后续投入应放在浏览器 E2E、真实 RBAC 失败路径、多集群集成，以及拆分过大的 API 文件。
 
+## CI 与交付边界
+
+- kwok 创建完成不代表 Kubernetes API 的 post-start hook 已 ready。E2E 固定 Kubernetes `v1.30.4`，并轮询 `/readyz` 后才应用 CRD，避免 API server 初始化竞态。
+- Helm 渲染检查覆盖默认 RBAC、关闭 chart RBAC、关闭受限缓存卷以及自定义缓存挂载路径。`DATA_PATH` 由 Chart 统一推导，避免环境变量与 volume mount 不一致。
+- amd64 镜像在漏洞扫描后以只读根文件系统运行 `hash-password` smoke test，验证最终镜像中的服务二进制可执行。
+- OCI Chart 仅发布到 Docker Hub，并且只在 GitHub Release 发布后（或手动 dispatch）运行，不会在普通 `main` push 时绕过测试流水线。
+
 ## 本轮修复与回归保护
 
 ### 跨站认证 Cookie
@@ -69,8 +76,8 @@ kwok E2E 会种入 40 个 `ClusterVulnerabilityReport`，并验证：
 | 列表分页、排序、搜索、namespace、漏洞过滤 | 有 | 有 | 已覆盖 |
 | Overview 与受限趋势聚合 | 有 | 无 | 已覆盖关键授权聚合 |
 | Informer create/delete 实时同步 | 部分 | 有 | 已覆盖 |
-| 缓存容量、持久化、stale 读取 | 有 | 无 | 关键 Unit 已有，恢复兼容场景仍少 |
-| Helm 默认 RBAC 与渲染 | Render check | 无 | 已覆盖默认资源数量 |
+| 缓存容量、持久化、stale 读取、目录缺失 | 有 | 无 | 关键 Unit 已有，恢复兼容场景仍少 |
+| Helm RBAC、认证/CORS、缓存挂载与渲染 | Render check | 无 | 已覆盖默认和主要配置组合 |
 | 多 Cluster 来源与部分来源失败 | 部分 | 无 | 待补 |
 | Kubernetes RBAC 拒绝 `list/watch/get` | 无 | 无 | 待补 |
 | 跨站浏览器登录与 Cookie 发送 | Cookie Unit | 无 | 待补真实浏览器验证 |
@@ -88,8 +95,7 @@ kwok E2E 会种入 40 个 `ClusterVulnerabilityReport`，并验证：
 
 1. local auth 下详情 API 的允许与拒绝路径，特别是缺少 `_` scope 的 Cluster-scoped detail。
 2. 缓存快照升级、损坏文件、磁盘写满和旧 fingerprint 清理。
-3. Helm test：existing Secret、`rbac.create=false`、CORS + local auth 的环境变量渲染。
-4. 建立前端测试 runner，优先覆盖登录恢复、全局/Cluster 切换、ReportsList 的筛选与详情跳转。
+3. 建立前端测试 runner，优先覆盖登录恢复、全局/Cluster 切换、ReportsList 的筛选与详情跳转。
 
 ## 模块化与抽象评估
 

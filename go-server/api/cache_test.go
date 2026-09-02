@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -9,6 +10,29 @@ import (
 
 	"github.com/dgraph-io/ristretto"
 )
+
+func TestWritePrivateAtomicCreatesParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "cache.json")
+	want := []byte(`{"ok":true}`)
+
+	if err := writePrivateAtomic(path, want); err != nil {
+		t.Fatalf("writePrivateAtomic() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("file contents = %q, want %q", got, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("file mode = %o, want 0600", info.Mode().Perm())
+	}
+}
 
 func TestParseByteSize(t *testing.T) {
 	tests := map[string]int64{

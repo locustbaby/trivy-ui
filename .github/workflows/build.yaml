@@ -14,10 +14,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   tests:
     name: Unit & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout Repository
@@ -66,19 +70,33 @@ jobs:
         run: |
           helm lint charts/trivy-ui
           helm template trivy-ui charts/trivy-ui --set auth.mode=none >/tmp/trivy-ui-none.yaml
-          helm template trivy-ui charts/trivy-ui --set auth.mode=local --set auth.local.existingSecret=trivy-ui-auth >/tmp/trivy-ui-local.yaml
+          helm template trivy-ui charts/trivy-ui --set auth.mode=local --set auth.local.existingSecret=trivy-ui-auth --set-string env.CORS_ALLOWED_ORIGINS=https://ui.example.com >/tmp/trivy-ui-local.yaml
+          helm template trivy-ui charts/trivy-ui --set cache.enabled=false >/tmp/trivy-ui-cache-disabled.yaml
+          helm template trivy-ui charts/trivy-ui --set cache.mountPath=/var/lib/trivy-ui >/tmp/trivy-ui-cache-custom.yaml
+          helm template trivy-ui charts/trivy-ui --set rbac.create=false >/tmp/trivy-ui-rbac-disabled.yaml
           test "$(grep -c '^kind: ClusterRole$' /tmp/trivy-ui-none.yaml)" -eq 2
           test "$(grep -c '^kind: ClusterRoleBinding$' /tmp/trivy-ui-none.yaml)" -eq 2
           grep -A3 '^kind: ClusterRole$' /tmp/trivy-ui-none.yaml | grep -q '^  name: trivy-ui$'
           grep -A3 '^kind: ClusterRoleBinding$' /tmp/trivy-ui-none.yaml | grep -q '^  name: trivy-ui$'
+          grep -A1 'name: AUTH_MODE' /tmp/trivy-ui-local.yaml | grep -q 'value: "local"'
+          grep -A1 'name: CORS_ALLOWED_ORIGINS' /tmp/trivy-ui-local.yaml | grep -q 'value: "https://ui.example.com"'
+          grep -A1 'name: DATA_PATH' /tmp/trivy-ui-cache-disabled.yaml | grep -q 'value: "/tmp/trivy-ui-data"'
+          grep -q 'name: runtime-data' /tmp/trivy-ui-cache-disabled.yaml
+          grep -q 'mountPath: "/tmp/trivy-ui-data"' /tmp/trivy-ui-cache-disabled.yaml
+          grep -A1 'name: DATA_PATH' /tmp/trivy-ui-cache-custom.yaml | grep -q 'value: "/var/lib/trivy-ui"'
+          grep -q 'mountPath: "/var/lib/trivy-ui"' /tmp/trivy-ui-cache-custom.yaml
+          test "$(grep -c '^kind: ClusterRole$' /tmp/trivy-ui-rbac-disabled.yaml)" -eq 0
+          test "$(grep -c '^kind: ClusterRoleBinding$' /tmp/trivy-ui-rbac-disabled.yaml)" -eq 0
 
   e2e-kwok:
     name: E2E (kwok)
     runs-on: ubuntu-latest
     needs: tests
+    timeout-minutes: 25
 
     env:
       KWOK_VERSION: v0.7.0
+      KWOK_KUBERNETES_VERSION: v1.30.4
       KWOK_CLUSTER: trivy-ui-e2e
       E2E_BASE_URL: http://127.0.0.1:8099
 
@@ -102,13 +120,23 @@ jobs:
       - name: Create kwok cluster (real kube-apiserver + etcd)
         run: |
           kwokctl create cluster --name "$KWOK_CLUSTER" \
-            --runtime docker --timeout 5m
+            --runtime docker --kube-version "$KWOK_KUBERNETES_VERSION" --timeout 5m
           # The kubeconfig under ~/.kwok references cert paths that only exist
           # inside the apiserver container; `get kubeconfig` emits a host-usable
           # one (rewritten cert paths + server address).
           kwokctl get kubeconfig --name "$KWOK_CLUSTER" > /tmp/kwok-kubeconfig.yaml
           echo "KUBECONFIG=/tmp/kwok-kubeconfig.yaml" >> "$GITHUB_ENV"
-          kubectl get --raw /readyz
+          for i in $(seq 1 60); do
+            if kubectl get --raw=/readyz >/dev/null 2>&1; then
+              echo "Kubernetes API ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Kubernetes API did not become ready"
+          kubectl get --raw=/readyz || true
+          docker ps -a
+          exit 1
 
       - name: Apply Trivy Operator CRDs
         run: kubectl apply -f go-server/test/e2e/fixtures/crds.yaml
@@ -165,6 +193,7 @@ jobs:
   build-and-scan:
     runs-on: ubuntu-latest
     needs: [tests, e2e-kwok]
+    timeout-minutes: 35
 
     steps:
       - name: Checkout Repository
@@ -263,6 +292,13 @@ jobs:
           else
             echo "found_vuln=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Smoke test the production image
+        run: |
+          docker run --rm --read-only --tmpfs /tmp \
+            --entrypoint /app/go-server trivy-ui:${{ env.TAG }}-scan \
+            hash-password smoke-test >/tmp/trivy-ui-password-hash
+          test -s /tmp/trivy-ui-password-hash
 
       - name: Build arm64 Docker Image for Scanning
         uses: docker/build-push-action@v7

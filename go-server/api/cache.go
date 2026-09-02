@@ -1140,6 +1140,9 @@ func parseByteSize(raw string) (int64, error) {
 
 func writePrivateAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return fmt.Errorf("create cache directory: %w", err)
+	}
 	tmp, err := os.CreateTemp(dir, ".trivy-ui-*.tmp")
 	if err != nil {
 		return err

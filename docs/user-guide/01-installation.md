@@ -14,9 +14,7 @@ The default chart installation creates the application ServiceAccount and
 cluster-wide read-only RBAC resources:
 
 ```bash
-helm repo add trivy-ui https://locustbaby.github.io/trivy-ui/
-helm repo update
-helm upgrade --install trivy-ui trivy-ui/trivy-ui
+helm upgrade --install trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui
 ```
 
 The chart creates separate ClusterRoles for report access and API/CRD
@@ -80,9 +78,16 @@ rbac:
 
 ## Persistent cache
 
-The chart mounts the cache at `/cache` and sets `DATA_PATH` accordingly. If the
-container is run directly, the default writable data directory is
-`/tmp/trivy-ui-data`.
+The chart derives `DATA_PATH` from `cache.mountPath` (default: `/cache`) and
+mounts the cache volume at that same path. Do not set `env.DATA_PATH` in Helm
+values: it is intentionally chart-managed so the process path and mount cannot
+drift apart.
+
+Set `cache.enabled: false` to remove the size-limited cache volume. The chart
+still mounts a writable pod-lifetime `emptyDir` at `/tmp/trivy-ui-data`, because
+the server persists its cache while the pod runs and its root filesystem is
+read-only. If the container is run directly, that is also the default data
+directory.
 
 ## Removed Namespace mode configuration
 

@@ -63,9 +63,13 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             {{- range $key, $value := .Values.env }}
+            {{- if ne $key "DATA_PATH" }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- end }}
+            - name: DATA_PATH
+              value: {{ include "trivy-ui.dataPath" . | quote }}
             - name: AUTH_MODE
               value: {{ .Values.auth.mode | quote }}
             - name: AUTH_LOCAL_BACKEND
@@ -144,7 +148,10 @@ spec:
             {{- end }}
             {{- if .Values.cache.enabled }}
             - name: cache
-              mountPath: {{ .Values.cache.mountPath | default "/cache" }}
+              mountPath: {{ include "trivy-ui.dataPath" . | quote }}
+            {{- else }}
+            - name: runtime-data
+              mountPath: {{ include "trivy-ui.dataPath" . | quote }}
             {{- end }}
       volumes:
         {{- if eq .Values.auth.mode "local" }}
@@ -161,6 +168,9 @@ spec:
         - name: cache
           emptyDir:
             sizeLimit: {{ .Values.cache.sizeLimit | default "1Gi" }}
+        {{- else }}
+        - name: runtime-data
+          emptyDir: {}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

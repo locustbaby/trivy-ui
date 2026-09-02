@@ -45,11 +45,6 @@ docker run -d \
 # Install directly from Docker Hub OCI registry
 helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui
 
-# Or from GitHub Pages
-helm repo add trivy-ui https://locustbaby.github.io/trivy-ui/
-helm repo update
-helm install my-trivy-ui trivy-ui/trivy-ui
-
 # Or from local chart
 git clone https://github.com/locustbaby/trivy-ui.git
 cd trivy-ui/charts/trivy-ui

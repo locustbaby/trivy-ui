@@ -14,17 +14,6 @@ the [project documentation](../../docs/README.md).
 helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui
 ```
 
-### From GitHub Pages
-
-```bash
-# Add the Helm repository
-helm repo add trivy-ui https://locustbaby.github.io/trivy-ui/
-helm repo update
-
-# Install the chart
-helm install my-trivy-ui trivy-ui/trivy-ui
-```
-
 ### From Local Chart
 
 ```bash

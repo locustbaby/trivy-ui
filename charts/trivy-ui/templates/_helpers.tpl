@@ -82,3 +82,7 @@ Create the namespace name
 {{- $cfg := dict "title" (.Values.customErrorPage.title | default "Security dashboard unavailable") "message" (.Values.customErrorPage.message | default "") "items" (.Values.customErrorPage.items | default list) -}}
 {{- $cfg | toJson -}}
 {{- end -}}
+
+{{- define "trivy-ui.dataPath" -}}
+{{- if .Values.cache.enabled }}{{ .Values.cache.mountPath | default "/cache" }}{{ else }}/tmp/trivy-ui-data{{ end -}}
+{{- end -}}

@@ -1,43 +1,43 @@
 name: Release Helm Chart
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'charts/**'
   release:
     types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: chart-oci-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
           fetch-depth: 0
-
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          persist-credentials: false
 
       - name: Install Helm
-        uses: azure/setup-helm@v3
-        with:
-          version: v3.12.0
-
-      - name: Add Helm repositories
-        run: |
-          helm repo add stable https://charts.helm.sh/stable
+        uses: azure/setup-helm@v5
 
       - name: Lint chart
         run: |
           helm lint charts/trivy-ui/
+
+      - name: Verify release version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          test "v$(helm show chart charts/trivy-ui/ | awk '/^version:/{print $2}')" = "$RELEASE_TAG"
+          test "$(helm show chart charts/trivy-ui/ | awk '/^appVersion:/{gsub(/\"/, "", $2); print $2}')" = "$RELEASE_TAG"
 
       - name: Package chart
         run: |
@@ -45,7 +45,7 @@ jobs:
           ls -la *.tgz
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
