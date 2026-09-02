@@ -1,3 +1,4 @@
+import * as React from "react"
 import { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import { useSearchParams } from "react-router-dom"
 import { api, CLUSTER_SCOPED_NAMESPACE, type Report, type ReportType } from "../api/client"
@@ -16,8 +17,9 @@ interface ReportsListProps {
 
 const PAGE_SIZE = 50
 const AUTO_REFRESH_INTERVAL = 15000
+const reportIdentity = (report: Report) => JSON.stringify([report.cluster, report.namespace, report.type, report.name])
 
-export function ReportsList({
+function ReportsListInternal({
   typeName,
   reportTypes,
   selectedCluster,
@@ -57,7 +59,8 @@ export function ReportsList({
   const observerTarget = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const isFirstLoad = useRef(true)
-  const fetchInProgressRef = useRef<string | null>(null) // Track current fetch to prevent duplicates
+  const activeRequestRef = useRef<AbortController | null>(null)
+  const requestGenerationRef = useRef(0)
 
   const reportType = reportTypes.find((t) => t.name === typeName)
   const isNamespaced = reportType?.namespaced ?? false
@@ -130,7 +133,7 @@ export function ReportsList({
     navigator.clipboard
       .writeText(url.toString())
       .then(() => {
-        const reportId = `${report.cluster}-${report.namespace}-${report.name}`
+        const reportId = reportIdentity(report)
         setCopiedReportId(reportId)
         setTimeout(() => setCopiedReportId(null), 2000)
       })
@@ -184,24 +187,24 @@ export function ReportsList({
     pageNum: number,
     reset: boolean = false,
     overrideNamespaces?: string[],
-    showLoadingState: boolean = true,
-    pageSizeOverride?: number
+    showLoadingState: boolean = true
   ) => {
     const namespacesToUse = overrideNamespaces ?? urlNamespaceValues
     const namespaceParams = isNamespaced && namespacesToUse.length > 0 && !namespacesToUse.includes("all")
       ? namespacesToUse.join(",")
       : undefined
-    const effectivePageSize = pageSizeOverride ?? PAGE_SIZE
+    const effectivePageSize = PAGE_SIZE
 
-    const requestKey = `${typeName}-${selectedCluster}-${namespaceParams}-${pageNum}-${effectivePageSize}-${reset}-${urlSearch}-${urlShowAll}`
-
-    if (fetchInProgressRef.current === requestKey) {
-      return
-    }
+    const generation = requestGenerationRef.current + 1
+    requestGenerationRef.current = generation
+    activeRequestRef.current?.abort()
+    const controller = new AbortController()
+    activeRequestRef.current = controller
 
     try {
-      fetchInProgressRef.current = requestKey
-
+      if (reset) {
+        setLoadingMore(false)
+      }
       if (showLoadingState && reset) {
         setLoading(true)
       } else if (showLoadingState) {
@@ -216,8 +219,10 @@ export function ReportsList({
         selectedCluster || undefined,
         namespaceParams,
         urlSearch || undefined,
-        !urlShowAll
+        !urlShowAll,
+        controller.signal
       )
+      if (generation !== requestGenerationRef.current) return
       const responseData = Array.isArray(response.data) ? response.data : []
       setTotal(response.total)
       if (!urlSearch && urlShowAll && namespaceParams === undefined) {
@@ -228,24 +233,84 @@ export function ReportsList({
         setReports(responseData)
       } else {
         setReports((prev) => {
-          const existingKeys = new Set(prev.map(r => `${r.cluster}-${r.namespace}-${r.name}`))
-          const newReports = responseData.filter(r => !existingKeys.has(`${r.cluster}-${r.namespace}-${r.name}`))
+          const existingKeys = new Set(prev.map(reportIdentity))
+          const newReports = responseData.filter((report) => !existingKeys.has(reportIdentity(report)))
           return [...prev, ...newReports]
         })
       }
       setHasMore(responseData.length === effectivePageSize && (pageNum * effectivePageSize) < response.total)
     } catch (err) {
-      if (showLoadingState) {
+      if (err instanceof Error && err.name === "AbortError") return
+      if (generation === requestGenerationRef.current && showLoadingState) {
         setError(err instanceof Error ? err.message : "Failed to fetch reports")
       }
     } finally {
-      if (showLoadingState) {
-        setLoading(false)
+      if (generation === requestGenerationRef.current) {
+        if (showLoadingState) setLoading(false)
         setLoadingMore(false)
+        activeRequestRef.current = null
       }
-      fetchInProgressRef.current = null
     }
   }, [typeName, selectedCluster, urlNamespaceValues, isNamespaced, urlSearch, urlShowAll, onTotalChange])
+
+  const refreshLoadedReports = useCallback(async () => {
+    const pagesToRefresh = Math.max(1, page)
+    const namespacesToUse = urlNamespaceValues
+    const namespaceParams = isNamespaced && namespacesToUse.length > 0 && !namespacesToUse.includes("all")
+      ? namespacesToUse.join(",")
+      : undefined
+    const generation = requestGenerationRef.current + 1
+    requestGenerationRef.current = generation
+    activeRequestRef.current?.abort()
+    const controller = new AbortController()
+    activeRequestRef.current = controller
+
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: pagesToRefresh }, (_, index) => api.getReportsByType(
+          typeName,
+          index + 1,
+          PAGE_SIZE,
+          selectedCluster || undefined,
+          namespaceParams,
+          urlSearch || undefined,
+          !urlShowAll,
+          controller.signal
+        ))
+      )
+      if (generation !== requestGenerationRef.current) return
+
+      const merged: Report[] = []
+      const seen = new Set<string>()
+      for (const response of responses) {
+        for (const report of Array.isArray(response.data) ? response.data : []) {
+          const key = reportIdentity(report)
+          if (!seen.has(key)) {
+            seen.add(key)
+            merged.push(report)
+          }
+        }
+      }
+      const totalReports = responses[0]?.total ?? 0
+      setReports(merged)
+      setTotal(totalReports)
+      setPage(Math.min(pagesToRefresh, Math.max(1, Math.ceil(totalReports / PAGE_SIZE))))
+      setHasMore(pagesToRefresh * PAGE_SIZE < totalReports)
+      if (!urlSearch && urlShowAll && namespaceParams === undefined) {
+        onTotalChange?.(typeName, totalReports)
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return
+      if (generation === requestGenerationRef.current) {
+        setError(err instanceof Error ? err.message : "Failed to refresh reports")
+      }
+    } finally {
+      if (generation === requestGenerationRef.current) {
+        setLoadingMore(false)
+        activeRequestRef.current = null
+      }
+    }
+  }, [page, typeName, selectedCluster, urlNamespaceValues, isNamespaced, urlSearch, urlShowAll, onTotalChange])
 
   // Fetch namespaces for the cluster
   const fetchNamespaces = useCallback(async (): Promise<string[]> => {
@@ -253,21 +318,27 @@ export function ReportsList({
     try {
       const data = await api.getNamespacesByCluster(selectedCluster)
       const nsList = data.map((ns) => ns.name).sort()
-      setNamespaces(nsList)
-      setNamespacesLoaded(true)
       return nsList
     } catch (err) {
       console.error("Failed to fetch namespaces:", err)
-      setNamespacesLoaded(true)
       return []
     }
   }, [selectedCluster])
+
+  const fetchReportsRef = useRef(fetchReports)
+  fetchReportsRef.current = fetchReports
+  const searchParamsRef = useRef(searchParams)
+  searchParamsRef.current = searchParams
+  const updateUrlParamsRef = useRef(updateUrlParams)
+  updateUrlParamsRef.current = updateUrlParams
 
   // Reset and initialize when type or cluster changes
   // Note: Only depend on typeName, selectedCluster, isNamespaced - NOT on callback functions
   // This prevents re-fetching when unrelated URL params change (like closing report details)
   useEffect(() => {
     if (!typeName) return
+
+    let cancelled = false
 
     isFirstLoad.current = true
     setPage(1)
@@ -276,47 +347,86 @@ export function ReportsList({
     setHasMore(false)
     setNamespacesLoaded(false)
 
+    // Resolve the initial namespace selection synchronously from URL or
+    // localStorage so the first page of reports can be fetched in parallel
+    // with the namespace list (which only feeds the filter dropdown).
+    const syncPrevFilters = (namespaceParam: string | null) => {
+      const current = searchParamsRef.current
+      prevFiltersRef.current = `${namespaceParam}-${current.get("search") || ""}-${current.get("showAll") !== "false"}`
+    }
+    const applyNamespaceSelection = (namespaces: string[]) => {
+      const namespaceParam = namespaces.length > 0 && !namespaces.includes("all") ? namespaces.join(",") : null
+      setSelectedNamespaces(namespaces)
+      updateUrlParamsRef.current({ namespace: namespaceParam })
+      // Keep the filter-change watcher in sync with what we just wrote so the
+      // programmatic URL update does not trigger a duplicate fetch.
+      syncPrevFilters(namespaceParam)
+    }
+    const resolveInitialNamespaces = (): string[] => {
+      const urlNs = searchParamsRef.current.get("namespace")
+      const urlNsArray = urlNs ? urlNs.split(",").filter(Boolean) : []
+      if (urlNsArray.length > 0) return urlNsArray
+      if (!selectedCluster) return []
+      const savedNs = localStorage.getItem(`trivy-ui-selected-namespaces-${typeName}-${selectedCluster}`)
+      if (!savedNs) return []
+      try {
+        const parsed = JSON.parse(savedNs)
+        return Array.isArray(parsed) ? parsed.filter((ns) => typeof ns === "string") : []
+      } catch {
+        return []
+      }
+    }
+
     if (isNamespaced && selectedCluster) {
+      const urlNs = searchParamsRef.current.get("namespace")
+      const initialFromUrl = Boolean(urlNs)
+      const initialNamespaces = resolveInitialNamespaces()
+      applyNamespaceSelection(initialNamespaces)
+      fetchReportsRef.current(1, true, initialNamespaces)
+
       fetchNamespaces().then((availableNamespaces) => {
-        const urlNs = searchParams.get("namespace")
-        const urlNsArray = urlNs ? urlNs.split(",").filter(Boolean) : []
+        if (cancelled) return
+        setNamespaces(availableNamespaces)
+        setNamespacesLoaded(true)
 
-        // Validate URL namespaces against available namespaces
-        const validUrlNs = urlNsArray.filter((ns) => ns === "all" || availableNamespaces.includes(ns))
-
-        let namespacesToUse: string[] = []
-        if (validUrlNs.length > 0) {
-          // Use URL namespace if valid
-          namespacesToUse = validUrlNs
-        } else {
-          // Otherwise, load from localStorage for current type
-          const savedNs = localStorage.getItem(`trivy-ui-selected-namespaces-${typeName}-${selectedCluster}`)
-          if (savedNs) {
-            try {
-              const parsed = JSON.parse(savedNs)
-              if (Array.isArray(parsed)) {
-                namespacesToUse = parsed.filter((ns) => ns === "all" || availableNamespaces.includes(ns))
+        // Validate optimistically-used namespaces against the authoritative
+        // list; a corrective refetch only happens when they actually differ.
+        let validNamespaces = initialNamespaces.filter((ns) => ns === "all" || availableNamespaces.includes(ns))
+        if (initialFromUrl && validNamespaces.length === 0) {
+          // Preserve the legacy fallback: URL namespaces that no longer exist
+          // degrade to the saved selection instead of clearing the filter.
+          if (selectedCluster) {
+            const savedNs = localStorage.getItem(`trivy-ui-selected-namespaces-${typeName}-${selectedCluster}`)
+            if (savedNs) {
+              try {
+                const parsed = JSON.parse(savedNs)
+                if (Array.isArray(parsed)) {
+                  validNamespaces = parsed.filter((ns: unknown): ns is string => typeof ns === "string" && (ns === "all" || availableNamespaces.includes(ns)))
+                }
+              } catch {
+                // ignore parse error
               }
-            } catch (e) {
-              // ignore parse error
             }
           }
         }
-        // Always set selectedNamespaces and update URL, even if empty
-        setSelectedNamespaces(namespacesToUse)
-        updateUrlParams({ namespace: namespacesToUse.length > 0 && !namespacesToUse.includes("all") ? namespacesToUse.join(",") : null })
-        fetchReports(1, true, namespacesToUse)
+        if (validNamespaces.length !== initialNamespaces.length || validNamespaces.some((ns, i) => ns !== initialNamespaces[i])) {
+          applyNamespaceSelection(validNamespaces)
+          fetchReportsRef.current(1, true, validNamespaces)
+        }
         isFirstLoad.current = false
       })
     } else {
       // For non-namespaced types, clear namespace selection and URL
       setSelectedNamespaces([])
-      updateUrlParams({ namespace: null })
-      fetchReports(1, true, [])
+      updateUrlParamsRef.current({ namespace: null })
+      prevFiltersRef.current = `${null}-${searchParamsRef.current.get("search") || ""}-${searchParamsRef.current.get("showAll") !== "false"}`
+      fetchReportsRef.current(1, true, [])
       isFirstLoad.current = false
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [typeName, selectedCluster, isNamespaced])
+    return () => {
+      cancelled = true
+    }
+  }, [typeName, selectedCluster, isNamespaced, fetchNamespaces])
 
   useEffect(() => {
     setSearchInputValue(urlSearch)
@@ -376,8 +486,7 @@ export function ReportsList({
     if (!typeName || !selectedCluster) return
 
     const refresh = () => {
-      const loadedPageSize = Math.max(PAGE_SIZE, page * PAGE_SIZE)
-      fetchReports(1, true, undefined, false, loadedPageSize)
+      refreshLoadedReports()
     }
 
     const timer = window.setInterval(() => {
@@ -402,26 +511,31 @@ export function ReportsList({
       window.removeEventListener("focus", refresh)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
-  }, [typeName, selectedCluster, page, fetchReports])
+  }, [typeName, selectedCluster, refreshLoadedReports])
 
   const getSummaryCounts = (report: Report) => {
     if (!report.data || typeof report.data !== "object") return null
-    const data = report.data as any
+    const data = report.data
+    if (!data || typeof data !== "object") return null
 
-    let summary: any = null
+    let summary: Record<string, unknown> | null = null
 
-    if (data.summary && typeof data.summary === "object") {
-      summary = data.summary
-    } else if (data.report && typeof data.report === "object" && data.report.summary) {
-      summary = data.report.summary
+    const dataRecord = data as Record<string, unknown>
+    if (dataRecord.summary && typeof dataRecord.summary === "object") {
+      summary = dataRecord.summary as Record<string, unknown>
+    } else if (dataRecord.report && typeof dataRecord.report === "object") {
+      const reportData = dataRecord.report as Record<string, unknown>
+      if (reportData.summary && typeof reportData.summary === "object") {
+        summary = reportData.summary as Record<string, unknown>
+      }
     }
 
     if (summary && typeof summary === "object") {
       return {
-        critical: summary.criticalCount || 0,
-        high: summary.highCount || 0,
-        medium: summary.mediumCount || 0,
-        low: summary.lowCount || 0,
+        critical: Number(summary.criticalCount) || 0,
+        high: Number(summary.highCount) || 0,
+        medium: Number(summary.mediumCount) || 0,
+        low: Number(summary.lowCount) || 0,
       }
     }
     return null
@@ -572,7 +686,7 @@ export function ReportsList({
         <>
           <div className="grid gap-3">
             {filteredReports.map((report) => {
-              const reportId = `${report.cluster}-${report.namespace}-${report.name}`
+              const reportId = reportIdentity(report)
               const counts = getSummaryCounts(report)
               const hasSeverity = counts && (counts.critical > 0 || counts.high > 0 || counts.medium > 0 || counts.low > 0)
 
@@ -703,3 +817,5 @@ export function ReportsList({
     </div>
   )
 }
+
+export const ReportsList = React.memo(ReportsListInternal)

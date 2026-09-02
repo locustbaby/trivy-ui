@@ -34,12 +34,16 @@ type CRDRegistry struct {
 
 func GetGlobalRegistry() *CRDRegistry {
 	registryOnce.Do(func() {
-		globalRegistry = &CRDRegistry{
-			reportsByName: make(map[string]*ReportKind),
-			refreshTTL:    5 * time.Minute,
-		}
+		globalRegistry = NewCRDRegistry()
 	})
 	return globalRegistry
+}
+
+func NewCRDRegistry() *CRDRegistry {
+	return &CRDRegistry{
+		reportsByName: make(map[string]*ReportKind),
+		refreshTTL:    5 * time.Minute,
+	}
 }
 
 func (r *CRDRegistry) DiscoverCRDs(config *rest.Config) error {
@@ -97,6 +101,9 @@ func (r *CRDRegistry) DiscoverCRDsFromAPIResources(config *rest.Config) error {
 	}
 
 	// Build pointer map after slice is fully constructed to avoid dangling pointers
+	if len(reports) == 0 {
+		return fmt.Errorf("no Trivy report CRDs discovered")
+	}
 	for i := range reports {
 		reportsByName[reports[i].Name] = &reports[i]
 	}
@@ -165,6 +172,9 @@ func (r *CRDRegistry) DiscoverCRDsFromCRDList(config *rest.Config) error {
 	}
 
 	// Build pointer map after slice is fully constructed to avoid dangling pointers
+	if len(reports) == 0 {
+		return fmt.Errorf("no Trivy report CRDs discovered")
+	}
 	for i := range reports {
 		reportsByName[reports[i].Name] = &reports[i]
 	}

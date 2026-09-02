@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trivy UI — Support</title>
+  <style>
+    /* Self-contained styles; no external resources required */
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .card {
+      max-width: 560px;
+      width: 100%;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.08);
+    }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p  { font-size: 14px; color: #475569; line-height: 1.7; margin: 8px 0; }
+    ul { padding-left: 20px; margin: 12px 0; }
+    li { font-size: 14px; color: #334155; line-height: 2; }
+    a  { color: #7c3aed; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: #f1f5f9;
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-size: 12px;
+    }
+    .meta { margin-top: 20px; font-size: 12px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <!--
+    Trivy UI custom error page template (raw-HTML escape hatch).
+
+    NOTE: Prefer the structured ERROR_PAGE_CONFIG channel (or the Helm
+    `customErrorPage` values section) when you only need contacts and links —
+    it is rendered natively by the UI with no HTML required. Use this file
+    only when you need fully custom branding/layout.
+
+    Usage (plain Docker):
+      docker run -v /path/to/error-page.html:/app/error-page.html:ro \
+        -e ERROR_PAGE_FILE=/app/error-page.html ...
+
+    Usage (Kubernetes): mount the file via a ConfigMap volume and set
+      - name: ERROR_PAGE_FILE
+        value: /etc/trivy-ui/error-page/error-page.html
+
+    Notes:
+      - The page is shown full-screen by the UI on authentication failures,
+        access denials and service unavailability. Use it for contact
+        details, on-call information and links to related documentation.
+      - The file is hot-reloaded on change (mtime-based); no restart needed.
+      - It is rendered with the same trust level as the application itself
+        (it may contain scripts/links), so never point ERROR_PAGE_FILE at
+        user-writable storage.
+      - For troubleshooting, ask users to include the API response's
+        error.requestId value — it correlates with server-side logs.
+  -->
+  <div class="card">
+    <h1>Security dashboard is unavailable</h1>
+    <p>This may be caused by an expired session, insufficient permissions, or a temporary service outage. Please reach out to the platform team:</p>
+    <ul>
+      <li>On-call chat: <strong>#platform-oncall</strong></li>
+      <li>Email: <a href="mailto:sec-platform@example.com">sec-platform@example.com</a></li>
+      <li>Runbook: <a href="https://wiki.example.com/trivy-ui/runbook">Trivy UI Runbook</a></li>
+    </ul>
+    <p class="meta">
+      When reporting an issue, include this page's URL and the time of the
+      error. The <code>error.requestId</code> value from the failed API
+      response helps us locate the corresponding server logs quickly.
+    </p>
+  </div>
+</body>
+</html>

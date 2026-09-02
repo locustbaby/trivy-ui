@@ -139,6 +139,21 @@ cd trivy-dashboard && npm install && npm run dev
 
 Access the frontend dev server at http://localhost:5173
 
+## Testing
+
+Unit tests (pure Go, no cluster needed):
+
+```shell
+cd go-server && go test ./...
+```
+
+End-to-end tests run the real server against a [kwok](https://kwok.sigs.k8s.io)
+cluster (a real kube-apiserver + etcd with fake nodes) seeded with hundreds of
+synthetic report CRs. They verify pagination completeness, order stability
+across refreshes, data correctness against ground truth read back from the API
+server, filters and the error matrix. See `go-server/test/e2e/README.md` for
+local instructions — CI runs them automatically in the `e2e-kwok` job.
+
 ## Configuration
 
 ### Environment Variables
@@ -146,10 +161,62 @@ Access the frontend dev server at http://localhost:5173
 | Variable         | Description                           | Default              |
 |------------------|---------------------------------------|----------------------|
 | `PORT`           | HTTP port                             | `8080`               |
-| `DEBUG`          | Enable debug logging                  | `false`              |
+| `LOG_LEVEL`      | Logging level (`debug`, `info`, `warning`, `error`) | `info` |
 | `STATIC_PATH`    | Path to frontend assets               | `trivy-dashboard/dist` |
 | `KUBECONFIG_DIR` | Directory containing kubeconfig files | `/kubeconfigs`       |
 | `DATA_PATH`      | Directory for cache persistence       | `/cache`             |
+| `ERROR_PAGE_CONFIG` | Structured JSON (`{"title","message","items":[{"type":"email\|link","label","value"}]}`) for the support page shown on auth/access/availability errors. Rendered natively by the UI; preferred over `ERROR_PAGE_FILE` | _(unset)_ |
+| `ERROR_PAGE_FILE`| Path to an operator-provided HTML file served publicly at `/error-page.html` — escape hatch for fully custom branding. Hot-reloaded on change; rendered with the same trust level as the app itself, so never point it at user-writable storage | _(unset)_ |
+
+#### Custom error page (Kubernetes / Helm)
+
+The recommended way is structured config in Helm values — no HTML required:
+
+```yaml
+customErrorPage:
+  enabled: true
+  title: "Security dashboard unavailable"
+  message: "Contact the platform team for help:"
+  items:
+    - type: email
+      label: Email
+      value: sec-platform@example.com
+    - type: link
+      label: On-call chat
+      value: https://chat.example.com/platform-oncall
+    - type: link
+      label: Runbook
+      value: https://wiki.example.com/trivy-ui/runbook
+```
+
+Edit `values.yaml` (or a custom values file) and run `helm upgrade` to apply.
+
+A ready-to-use raw-HTML template lives at [`examples/error-page.example.html`](./examples/error-page.example.html) for the `ERROR_PAGE_FILE` escape hatch:
+
+```shell
+docker run -d -v /path/to/error-page.html:/app/error-page.html:ro \
+  -e ERROR_PAGE_FILE=/app/error-page.html -p 8080:8080 locustbaby/trivy-ui:v0.0.4
+```
+
+### Error Codes
+
+Every API error response carries a machine-readable code in `error.type`, plus
+the `X-Request-ID` header value in `error.requestId` for log correlation:
+
+```json
+{"code":1,"message":"report access denied","error":{"type":"ACCESS_DENIED","requestId":"..."}}
+```
+
+| Code | Meaning |
+|------|---------|
+| `INTERNAL_ERROR` | Unexpected server-side failure |
+| `VALIDATION_FAILED` | Invalid request parameters |
+| `AUTH_REQUIRED` | Not authenticated (session missing/expired) or login rejected |
+| `ACCESS_DENIED` | Authenticated but outside namespace/cluster scope |
+| `REPORT_NOT_FOUND` | Report does not exist |
+| `REPORT_AMBIGUOUS` | Reference matches multiple reports; narrow the query |
+| `PROVIDER_UNAVAILABLE` | Cluster client unavailable or upstream fetch failed |
+| `DATA_INCOMPLETE` | Cache capacity exceeded; data may be partial |
 
 ## API Reference
 

@@ -1,3 +1,14 @@
+{{- if not (has .Values.auth.mode (list "none" "local")) }}
+{{- fail "auth.mode must be one of: none, local" }}
+{{- end }}
+{{- if eq .Values.auth.mode "local" }}
+{{- if ne .Values.auth.local.backend "file" }}
+{{- fail "auth.local.backend must be file" }}
+{{- end }}
+{{- if or (empty .Values.auth.local.existingSecret) (empty .Values.auth.local.configKey) (empty .Values.auth.local.sessionSecretKey) }}
+{{- fail "auth.local.existingSecret, auth.local.configKey and auth.local.sessionSecretKey are required when auth.mode=local" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,9 +16,7 @@ metadata:
   labels:
     {{- include "trivy-ui.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
-  {{- end }}
   selector:
     matchLabels:
       {{- include "trivy-ui.selectorLabels" . | nindent 6 }}
@@ -16,6 +25,25 @@ spec:
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
+        {{- if eq $.Values.auth.mode "local" }}
+        checksum/trivy-ui-auth: {{ include "trivy-ui.authSecretChecksum" $ }}
+        {{- end }}
+        {{- if and $.Values.kubeconfigs.enabled $.Values.kubeconfigs.secretName }}
+        checksum/trivy-ui-kubeconfigs: {{ include "trivy-ui.kubeconfigSecretChecksum" $ }}
+        {{- end }}
+      {{- else }}
+      {{- if eq .Values.auth.mode "local" }}
+      annotations:
+        checksum/trivy-ui-auth: {{ include "trivy-ui.authSecretChecksum" . }}
+        {{- if and .Values.kubeconfigs.enabled .Values.kubeconfigs.secretName }}
+        checksum/trivy-ui-kubeconfigs: {{ include "trivy-ui.kubeconfigSecretChecksum" . }}
+        {{- end }}
+      {{- else }}
+      {{- if and .Values.kubeconfigs.enabled .Values.kubeconfigs.secretName }}
+      annotations:
+        checksum/trivy-ui-kubeconfigs: {{ include "trivy-ui.kubeconfigSecretChecksum" . }}
+      {{- end }}
+      {{- end }}
       {{- end }}
       labels:
         {{- include "trivy-ui.selectorLabels" . | nindent 8 }}
@@ -37,6 +65,53 @@ spec:
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
+            {{- end }}
+            - name: AUTH_MODE
+              value: {{ .Values.auth.mode | quote }}
+            - name: AUTH_LOCAL_BACKEND
+              value: {{ .Values.auth.local.backend | quote }}
+            - name: AUTH_FILE_PATH
+              value: {{ printf "/etc/trivy-ui/auth/%s" .Values.auth.local.configKey | quote }}
+            - name: AUTH_SESSION_DURATION
+              value: {{ .Values.auth.session.duration | quote }}
+            - name: AUTH_COOKIE_SECURE
+              value: {{ .Values.auth.session.cookieSecure | quote }}
+            - name: DATA_ACCESS_MODE
+              value: {{ .Values.dataAccess.mode | quote }}
+            - name: DATA_ACCESS_MAX_WATCH_STREAMS
+              value: {{ .Values.dataAccess.maxWatchStreams | quote }}
+            - name: DATA_ACCESS_CLUSTERS
+              value: {{ .Values.dataAccess.clusters | toJson | quote }}
+            - name: CLUSTER_SOURCES
+              value: {{ if .Values.clusterSources }}{{ .Values.clusterSources | toJson | quote }}{{ else }}""{{ end }}
+            - name: CACHE_DETAIL_MAX_SIZE
+              value: {{ .Values.cache.detail.maxSize | quote }}
+            - name: CACHE_DETAIL_PERSIST
+              value: {{ .Values.cache.detail.persist | quote }}
+            - name: CACHE_DETAIL_TTL
+              value: {{ .Values.cache.detail.ttl | quote }}
+            - name: CACHE_DETAIL_STALE_RETENTION
+              value: {{ .Values.cache.detail.staleRetention | quote }}
+            - name: CACHE_SUMMARY_MAX_ENTRIES
+              value: {{ .Values.cache.summary.maxEntries | quote }}
+            - name: CACHE_SNAPSHOT_MAX_SIZE
+              value: {{ .Values.cache.summary.snapshotMaxSize | quote }}
+            - name: CACHE_QUERY_MAX_ENTRIES
+              value: {{ .Values.cache.query.maxEntries | quote }}
+            - name: CACHE_QUERY_MAX_SIZE
+              value: {{ .Values.cache.query.maxSize | quote }}
+            - name: CACHE_QUERY_TTL
+              value: {{ .Values.cache.query.ttl | quote }}
+            {{- if .Values.customErrorPage.enabled }}
+            - name: ERROR_PAGE_CONFIG
+              value: {{ include "trivy-ui.errorPageConfig" . | quote }}
+            {{- end }}
+            {{- if eq .Values.auth.mode "local" }}
+            - name: AUTH_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.local.existingSecret }}
+                  key: {{ .Values.auth.local.sessionSecretKey }}
             {{- end }}
           ports:
             - name: http
@@ -61,7 +136,12 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.kubeconfigs.create }}
+            {{- if eq .Values.auth.mode "local" }}
+            - name: auth
+              mountPath: /etc/trivy-ui/auth
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.kubeconfigs.enabled .Values.kubeconfigs.secretName }}
             - name: kubeconfigs
               mountPath: /kubeconfigs
             {{- end }}
@@ -70,7 +150,12 @@ spec:
               mountPath: {{ .Values.cache.mountPath | default "/cache" }}
             {{- end }}
       volumes:
-        {{- if .Values.kubeconfigs.create }}
+        {{- if eq .Values.auth.mode "local" }}
+        - name: auth
+          secret:
+            secretName: {{ .Values.auth.local.existingSecret }}
+        {{- end }}
+        {{- if and .Values.kubeconfigs.enabled .Values.kubeconfigs.secretName }}
         - name: kubeconfigs
           secret:
             secretName: {{ .Values.kubeconfigs.secretName }}

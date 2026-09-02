@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react"
+import * as React from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { api } from "../api/client"
 import type { ClusterOverview, TrendRecord, WorkloadSummary } from "../api/client"
-import { Shield, AlertTriangle, AlertCircle, Info, ShieldCheck, Loader2 } from "lucide-react"
+import { Shield, AlertTriangle, AlertCircle, Info, ShieldCheck, Loader2, X } from "lucide-react"
+import { Button } from "./ui/button"
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts"
 
 interface OverviewDashboardProps {
@@ -11,41 +13,45 @@ interface OverviewDashboardProps {
   onSelectCluster: (cluster: string) => void
 }
 
-export function OverviewDashboard({ selectedCluster, onSelectNamespace, onSelectWorkload, onSelectCluster }: OverviewDashboardProps) {
+function OverviewDashboardInternal({ selectedCluster, onSelectNamespace, onSelectWorkload, onSelectCluster }: OverviewDashboardProps) {
   const [data, setData] = useState<ClusterOverview | null>(null)
   const [trends, setTrends] = useState<TrendRecord[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string>()
+  const [retryCount, setRetryCount] = useState(0)
+  const generationRef = useRef(0)
 
   useEffect(() => {
+    const generation = ++generationRef.current
+    const controller = new AbortController()
+    setData(null)
+    setTrends([])
+    setError(undefined)
     const load = async () => {
       setLoading(true)
       try {
         const [ovData, trData] = await Promise.all([
-          api.getOverview(selectedCluster),
-          api.getOverviewTrends(selectedCluster)
+          api.getOverview(selectedCluster, controller.signal),
+          api.getOverviewTrends(selectedCluster, 30, controller.signal)
         ])
-        setData(ovData)
-        setTrends(trData)
+        if (generation === generationRef.current) {
+          setData(ovData)
+          setTrends(trData)
+        }
       } catch (e) {
-        console.error(e)
+        if (e instanceof Error && e.name === "AbortError") return
+        if (generation === generationRef.current) {
+          setError(e instanceof Error ? e.message : "Failed to load overview")
+        }
       } finally {
-        setLoading(false)
+        if (generation === generationRef.current) setLoading(false)
       }
     }
     load()
-  }, [selectedCluster])
+    return () => controller.abort()
+  }, [selectedCluster, retryCount])
 
-  if (loading) {
-    return (
-      <div className="flex h-[60vh] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    )
-  }
-
-  if (!data) return null
-
-  const chartData = trends.map(t => {
+	const chartData = useMemo(() => trends.map(t => {
     const d = new Date(t.timestamp)
     return {
       name: `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:00`,
@@ -53,7 +59,27 @@ export function OverviewDashboard({ selectedCluster, onSelectNamespace, onSelect
       high: t.high,
       medium: t.medium
     }
-  })
+	}), [trends])
+
+	if (loading) {
+		return (
+			<div className="flex h-[60vh] items-center justify-center">
+				<Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+			</div>
+		)
+	}
+
+	if (error && !loading) {
+		return (
+			<div className="flex flex-col items-center justify-center py-16 rounded-2xl border bg-card/50">
+				<X className="h-12 w-12 text-destructive mb-3" />
+				<div className="mb-4 text-destructive font-medium">{error}</div>
+				<Button onClick={() => setRetryCount((count) => count + 1)} size="sm">Retry</Button>
+			</div>
+		)
+	}
+
+	if (!data) return null
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 ease-out">
@@ -140,9 +166,9 @@ export function OverviewDashboard({ selectedCluster, onSelectNamespace, onSelect
         <div className="rounded-2xl border bg-card p-5 shadow-sm">
           <h3 className="text-lg font-semibold mb-4">Top Vulnerable Workloads</h3>
           <div className="space-y-3">
-            {data.top_vulnerable_workloads.map((w, idx) => (
+            {data.top_vulnerable_workloads.map((w) => (
               <button 
-                key={idx} 
+                key={JSON.stringify([w.cluster, w.namespace, w.type, w.name])}
                 onClick={() => onSelectWorkload(w)}
                 className="w-full text-left p-3 rounded-xl hover:bg-muted/50 border border-transparent hover:border-border transition-colors flex items-center justify-between group"
               >
@@ -172,9 +198,9 @@ export function OverviewDashboard({ selectedCluster, onSelectNamespace, onSelect
           </h3>
           <div className="space-y-3">
             {!selectedCluster ? (
-              data.vulnerable_clusters?.map((c, idx) => (
+              data.vulnerable_clusters?.map((c) => (
                 <button 
-                  key={idx} 
+                  key={c.name}
                   onClick={() => onSelectCluster(c.name)}
                   className="w-full text-left p-3 rounded-xl hover:bg-muted/50 border border-transparent hover:border-border transition-colors flex items-center justify-between"
                 >
@@ -186,9 +212,9 @@ export function OverviewDashboard({ selectedCluster, onSelectNamespace, onSelect
                 </button>
               ))
             ) : (
-              data.vulnerable_namespaces?.map((ns, idx) => (
+              data.vulnerable_namespaces?.map((ns) => (
                 <button 
-                  key={idx} 
+                  key={`${ns.cluster || selectedCluster}\x00${ns.name}`}
                   onClick={() => onSelectNamespace(ns.name)}
                   className="w-full text-left p-3 rounded-xl hover:bg-muted/50 border border-transparent hover:border-border transition-colors flex items-center justify-between"
                 >
@@ -213,3 +239,5 @@ export function OverviewDashboard({ selectedCluster, onSelectNamespace, onSelect
     </div>
   )
 }
+
+export const OverviewDashboard = React.memo(OverviewDashboardInternal)

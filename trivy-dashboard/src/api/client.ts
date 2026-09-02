@@ -1,11 +1,15 @@
-const API_BASE_URL =
+export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
-  (import.meta.env.DEV ? "http://localhost:8080" : "")
+  ""
 
 export interface ApiResponse<T> {
   code: number
   message: string
   data?: T
+  error?: {
+    type?: string
+    requestId?: string
+  }
 }
 
 export interface ReportType {
@@ -20,6 +24,9 @@ export interface Cluster {
   name: string
   description?: string
   syncState?: string
+  observedAt?: string
+  stale?: boolean
+  dataComplete?: boolean
 }
 
 export interface Namespace {
@@ -34,8 +41,18 @@ export interface Report {
   namespace: string
   name: string
   status?: string
-  data: any
+  resourceVersion?: string
+  stale?: boolean
+  data: unknown
+  ref?: ReportRef
   updated_at?: string
+}
+
+export interface ReportRef {
+  cluster: string
+  namespace: string
+  type: string
+  name: string
 }
 
 export interface PaginatedResponse<T> {
@@ -43,6 +60,7 @@ export interface PaginatedResponse<T> {
   withVulnerabilities?: number
   page: number
   pageSize: number
+  hasNext?: boolean
   data: T[]
 }
 
@@ -75,6 +93,7 @@ export interface ClusterSummary {
 }
 
 export interface NamespaceSummary {
+  cluster?: string
   name: string
   critical: number
   high: number
@@ -92,6 +111,7 @@ export interface ClusterOverview {
 export interface TrendRecord {
   timestamp: string
   cluster: string
+  namespace?: string
   critical: number
   high: number
   medium: number
@@ -99,46 +119,114 @@ export interface TrendRecord {
 
 export const CLUSTER_SCOPED_NAMESPACE = "_"
 
+export class ApiError extends Error {
+  readonly status: number
+  readonly type?: string
+  readonly requestId?: string
+
+  constructor(status: number, message: string, type?: string, requestId?: string) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+    this.type = type
+    this.requestId = requestId
+  }
+}
+
 async function fetchApi<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${url}`, {
     cache: "no-store",
     signal,
+    credentials: "include",
     headers: {
       "Cache-Control": "no-cache",
     },
   })
+  const result: ApiResponse<T> = await response.json().catch(() => ({
+    code: 1,
+    message: `HTTP error! status: ${response.status}`,
+  }))
   if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`)
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent("trivy-ui:auth-expired"))
+    } else if (response.status === 403) {
+      window.dispatchEvent(new CustomEvent("trivy-ui:access-denied"))
+    } else if (response.status === 503) {
+      window.dispatchEvent(new CustomEvent("trivy-ui:service-unavailable"))
+    }
+    throw new ApiError(response.status, result.message || `HTTP error! status: ${response.status}`, result.error?.type, result.error?.requestId)
   }
-  const result: ApiResponse<T> = await response.json()
   if (result.code !== 0) {
-    throw new Error(result.message || "API error")
+    throw new ApiError(response.status, result.message || "API error", result.error?.type, result.error?.requestId)
+  }
+  return result.data as T
+}
+
+export interface AuthMe {
+  enabled: boolean
+  mode: "none" | "local"
+  authenticated: boolean
+  provider?: string
+  methods?: string[]
+  username?: string
+  groups?: string[]
+}
+
+async function sendAuth<T>(url: string, body?: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${url}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const result = await response.json().catch(() => ({ message: "Request failed" }))
+  if (!response.ok) {
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent("trivy-ui:auth-expired"))
+    } else if (response.status === 503) {
+      window.dispatchEvent(new CustomEvent("trivy-ui:service-unavailable"))
+    }
+    throw new ApiError(response.status, result.message || `HTTP error! status: ${response.status}`, result.error?.type, result.error?.requestId)
   }
   return result.data as T
 }
 
 export const api = {
-  getOverview: (cluster?: string): Promise<ClusterOverview> => {
-    const url = cluster ? `/api/v1/overview?cluster=${cluster}` : "/api/v1/overview"
-    return fetchApi<ClusterOverview>(url)
+  getAuthMe: async (): Promise<AuthMe> => {
+    const response = await fetch(`${API_BASE_URL}/api/v1/auth/me`, { credentials: "include", cache: "no-store" })
+    const result: ApiResponse<AuthMe> = await response.json().catch(() => ({ message: "Request failed" }))
+    if (!response.ok && response.status !== 401) {
+      throw new ApiError(response.status, result.message || `HTTP error! status: ${response.status}`, result.error?.type, result.error?.requestId)
+    }
+    return result.data || { enabled: true, mode: "local", authenticated: false, provider: "local", methods: ["password"] }
   },
 
-  getOverviewTrends: (cluster?: string, days: number = 30): Promise<TrendRecord[]> => {
+  login: (username: string, password: string) => sendAuth<{ username: string }>("/api/v1/auth/login", { username, password }),
+
+  logout: () => sendAuth<void>("/api/v1/auth/logout"),
+
+  getOverview: (cluster?: string, signal?: AbortSignal): Promise<ClusterOverview> => {
+    const url = cluster ? `/api/v1/overview?cluster=${encodeURIComponent(cluster)}` : "/api/v1/overview"
+    return fetchApi<ClusterOverview>(url, signal)
+  },
+
+  getOverviewTrends: (cluster?: string, days: number = 30, signal?: AbortSignal): Promise<TrendRecord[]> => {
     let url = `/api/v1/overview/trends?days=${days}`
-    if (cluster) url += `&cluster=${cluster}`
-    return fetchApi<TrendRecord[]>(url)
+    if (cluster) url += `&cluster=${encodeURIComponent(cluster)}`
+    return fetchApi<TrendRecord[]>(url, signal)
   },
 
-  getClusters: (): Promise<Cluster[]> => {
-    return fetchApi<Cluster[]>("/api/clusters")
+  getClusters: (signal?: AbortSignal): Promise<Cluster[]> => {
+    return fetchApi<Cluster[]>("/api/v1/clusters", signal)
   },
 
   getNamespacesByCluster: (cluster: string): Promise<Namespace[]> => {
-    return fetchApi<Namespace[]>(`/api/clusters/${cluster}/namespaces`)
+    return fetchApi<Namespace[]>(`/api/v1/clusters/${encodeURIComponent(cluster)}/namespaces`)
   },
 
-  getTypes: (): Promise<ReportType[]> => {
-    return fetchApi<ReportType[]>("/api/v1/type")
+  getTypes: (cluster?: string, signal?: AbortSignal): Promise<ReportType[]> => {
+    const query = cluster ? `?cluster=${encodeURIComponent(cluster)}` : ""
+    return fetchApi<ReportType[]>(`/api/v1/report-types${query}`, signal)
   },
 
   getReportsByType: (
@@ -148,7 +236,8 @@ export const api = {
     cluster?: string,
     namespace?: string,
     search?: string,
-    onlyVulnerable?: boolean
+    onlyVulnerable?: boolean,
+    signal?: AbortSignal
   ): Promise<PaginatedResponse<Report>> => {
     const params = new URLSearchParams()
     if (page) params.set("page", page.toString())
@@ -158,8 +247,8 @@ export const api = {
     if (search) params.set("search", search)
     if (onlyVulnerable !== undefined) params.set("onlyVulnerable", onlyVulnerable.toString())
     const query = params.toString()
-    const url = `/api/v1/reports?type=${typeName}${query ? `&${query}` : ""}`
-    return fetchApi<PaginatedResponse<Report>>(url)
+    const url = `/api/v1/reports?type=${encodeURIComponent(typeName)}${query ? `&${query}` : ""}`
+    return fetchApi<PaginatedResponse<Report>>(url, signal)
   },
 
   getReportDetails: (

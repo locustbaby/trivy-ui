@@ -2,11 +2,38 @@ import { useState, useCallback } from "react"
 import { Check, Copy } from "lucide-react"
 import type { Report } from "../../api/client"
 
+type JsonObject = Record<string, unknown>
+
+interface CopyableFieldProps {
+  value: string
+  fieldId: string
+  className?: string
+  copiedField: string | null
+  onCopy: (value: string, fieldId: string) => void
+}
+
+function CopyableField({ value, fieldId, className = "", copiedField, onCopy }: CopyableFieldProps) {
+  return (
+    <button
+      onClick={() => onCopy(value, fieldId)}
+      className={`group inline-flex items-center gap-1.5 hover:text-primary transition-colors cursor-pointer text-left ${className}`}
+      title="Click to copy"
+    >
+      <span className={copiedField === fieldId ? "text-green-500" : ""}>{value}</span>
+      {copiedField === fieldId ? (
+        <Check className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
+      ) : (
+        <Copy className="h-3.5 w-3.5 opacity-0 group-hover:opacity-50 flex-shrink-0" />
+      )}
+    </button>
+  )
+}
+
 interface ReportInfoCardProps {
   report: Report
   imageRef: string | null
-  artifact: any
-  scanner: any
+  artifact: JsonObject | null
+  scanner: JsonObject | null
   hasVulnerabilitiesType: boolean
   isSingleClusterMode?: boolean
 }
@@ -33,38 +60,23 @@ export function ReportInfoCard({
       })
   }, [])
 
-  const CopyableField = ({ value, fieldId, className = "" }: { value: string; fieldId: string; className?: string }) => (
-    <button
-      onClick={() => copyToClipboard(value, fieldId)}
-      className={`group inline-flex items-center gap-1.5 hover:text-primary transition-colors cursor-pointer text-left ${className}`}
-      title="Click to copy"
-    >
-      <span className={copiedField === fieldId ? "text-green-500" : ""}>{value}</span>
-      {copiedField === fieldId ? (
-        <Check className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
-      ) : (
-        <Copy className="h-3.5 w-3.5 opacity-0 group-hover:opacity-50 flex-shrink-0" />
-      )}
-    </button>
-  )
-
   return (
     <div className="rounded-lg border bg-gradient-to-br from-card to-muted/20 p-3">
       <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground">Name:</span>
-          <CopyableField value={report.name} fieldId="name" className="font-semibold" />
+          <CopyableField value={report.name} fieldId="name" className="font-semibold" copiedField={copiedField} onCopy={copyToClipboard} />
         </div>
         {!isSingleClusterMode && (
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">Cluster:</span>
-            <CopyableField value={report.cluster} fieldId="cluster" />
+            <CopyableField value={report.cluster} fieldId="cluster" copiedField={copiedField} onCopy={copyToClipboard} />
           </div>
         )}
         {report.namespace && (
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">Namespace:</span>
-            <CopyableField value={report.namespace} fieldId="namespace" />
+            <CopyableField value={report.namespace} fieldId="namespace" copiedField={copiedField} onCopy={copyToClipboard} />
           </div>
         )}
         {report.updated_at && (
@@ -73,10 +85,10 @@ export function ReportInfoCard({
             <span>{new Date(report.updated_at).toLocaleString()}</span>
           </div>
         )}
-        {hasVulnerabilitiesType && scanner && scanner.name && (
+        {hasVulnerabilitiesType && scanner && typeof scanner.name === "string" && (
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">Scanner:</span>
-            <span className="font-medium">{scanner.name}{scanner.version ? ` v${scanner.version}` : ''}</span>
+            <span className="font-medium">{String(scanner.name)}{scanner.version ? ` v${String(scanner.version)}` : ''}</span>
           </div>
         )}
       </div>
@@ -98,14 +110,14 @@ export function ReportInfoCard({
         </div>
       )}
 
-      {hasVulnerabilitiesType && artifact && artifact.digest && (
+      {hasVulnerabilitiesType && artifact && typeof artifact.digest === "string" && (
         <div className="mt-1.5">
           <button
-            onClick={() => copyToClipboard(artifact.digest, "digest")}
+            onClick={() => copyToClipboard(String(artifact.digest), "digest")}
             className="group w-full text-left text-xs font-mono break-all bg-muted/50 hover:bg-muted rounded px-2 py-1.5 transition-colors cursor-pointer flex items-center justify-between gap-2"
             title="Click to copy"
           >
-            <span className={copiedField === "digest" ? "text-green-500" : ""}>{artifact.digest}</span>
+            <span className={copiedField === "digest" ? "text-green-500" : ""}>{String(artifact.digest)}</span>
             {copiedField === "digest" ? (
               <Check className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
             ) : (

@@ -34,3 +34,5 @@ go-server/bin/trivy-server
 
 # Runtime generated data
 go-server/trend-history.json
+go-server/api/trend-history.json
+go-server/api/.trivy-ui-*.tmp

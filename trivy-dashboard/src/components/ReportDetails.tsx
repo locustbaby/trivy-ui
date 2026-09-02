@@ -1,13 +1,25 @@
-import { useState, useEffect, useMemo, useCallback } from "react"
-import { api, type Report } from "../api/client"
+import { useState, useEffect, useMemo, useCallback, useRef } from "react"
+import { api, ApiError, type Report } from "../api/client"
 import { Button } from "./ui/button"
 import { X, Loader2, Check, Share2 } from "lucide-react"
 import { ReportInfoCard } from "./reports/ReportInfoCard"
 import { SummaryCard } from "./reports/SummaryCard"
-import { VulnerabilitySection } from "./reports/VulnerabilitySection"
-import { ChecksSection } from "./reports/ChecksSection"
+import { VulnerabilitySection, type Vulnerability } from "./reports/VulnerabilitySection"
+import { ChecksSection, type Check as ReportCheck } from "./reports/ChecksSection"
+import { formatReportTypeName } from "../lib/utils"
+import { toast } from "../lib/toast"
 
 const DETAIL_REFRESH_INTERVAL = 15000
+
+type JsonObject = Record<string, unknown>
+
+interface Summary {
+  criticalCount?: number
+  highCount?: number
+  mediumCount?: number
+  lowCount?: number
+  noneCount?: number
+}
 
 interface ReportDetailsProps {
   typeName: string
@@ -17,13 +29,6 @@ interface ReportDetailsProps {
   isSingleClusterMode?: boolean
   onClose: () => void
   shareUrl?: string
-}
-
-function formatTypeName(name: string): string {
-  let formatted = name.replace(/Report$/i, "")
-  formatted = formatted.replace(/([a-z])([A-Z])/g, "$1 $2")
-  formatted = formatted.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-  return formatted.trim()
 }
 
 export function ReportDetails({
@@ -38,10 +43,18 @@ export function ReportDetails({
   const [report, setReport] = useState<Report | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
+  const [errorStatus, setErrorStatus] = useState<number>()
   const [copied, setCopied] = useState(false)
+  const requestGenerationRef = useRef(0)
+  const activeRequestRef = useRef<AbortController | null>(null)
 
-  const loadReport = useCallback((showLoading: boolean, replaceReport: boolean = false, signal?: AbortSignal) => {
+  const loadReport = useCallback((showLoading: boolean, replaceReport: boolean = false) => {
+    const generation = ++requestGenerationRef.current
+    activeRequestRef.current?.abort()
+    const controller = new AbortController()
+    activeRequestRef.current = controller
     setError(undefined)
+    setErrorStatus(undefined)
     if (showLoading) {
       setLoading(true)
     }
@@ -49,45 +62,56 @@ export function ReportDetails({
       setReport(null)
     }
 
-    api.getReportDetails(cluster || "", namespace || "", typeName, reportName, signal)
+    api.getReportDetails(cluster || "", namespace || "", typeName, reportName, controller.signal)
       .then((data) => {
+        if (generation !== requestGenerationRef.current) return
         setReport(data)
         setLoading(false)
       })
       .catch((err) => {
         if (err instanceof Error && err.name === "AbortError") return
+        if (generation !== requestGenerationRef.current) return
+        const message = err instanceof Error ? err.message : "Failed to fetch report details"
         if (showLoading) {
-          setError(err instanceof Error ? err.message : "Failed to fetch report details")
+          setError(message)
+          setErrorStatus(err instanceof ApiError ? err.status : undefined)
+        } else {
+          // Background refresh failed; surface it without wiping the view.
+          toast(`Could not refresh report details: ${message}`, "error")
         }
         setLoading(false)
+      })
+      .finally(() => {
+        if (generation === requestGenerationRef.current) {
+          activeRequestRef.current = null
+        }
       })
   }, [cluster, namespace, typeName, reportName])
 
   const handleRetry = useCallback(() => {
-    const controller = new AbortController()
-    loadReport(true, false, controller.signal)
+    loadReport(true, false)
   }, [loadReport])
 
   useEffect(() => {
-    const controller = new AbortController()
-    loadReport(true, true, controller.signal)
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (!cancelled) loadReport(true, true)
+    })
 
     return () => {
-      controller.abort()
+      cancelled = true
+      requestGenerationRef.current += 1
+      activeRequestRef.current?.abort()
     }
   }, [loadReport])
 
   useEffect(() => {
     const refresh = () => {
-      const controller = new AbortController()
-      loadReport(false, false, controller.signal)
-      return controller
+      loadReport(false, false)
     }
 
-    let controller: AbortController | null = null
     const runRefresh = () => {
-      controller?.abort()
-      controller = refresh()
+      refresh()
     }
 
     const timer = window.setInterval(() => {
@@ -106,7 +130,8 @@ export function ReportDetails({
     document.addEventListener("visibilitychange", handleVisibilityChange)
 
     return () => {
-      controller?.abort()
+      requestGenerationRef.current += 1
+      activeRequestRef.current?.abort()
       window.clearInterval(timer)
       window.removeEventListener("focus", runRefresh)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
@@ -138,33 +163,37 @@ export function ReportDetails({
     }
   }, [shareUrl])
 
-  const displayTypeName = formatTypeName(typeName)
+  const displayTypeName = formatReportTypeName(typeName)
 
   // Memoized data extraction
-  const reportData = useMemo(() => {
+  const reportData = useMemo<JsonObject | null>(() => {
     if (!report?.data || typeof report.data !== "object") return null
-    const data = report.data as any
-    if (data.report && typeof data.report === "object") {
-      return data.report
+    const data = report.data as JsonObject
+    if (data.report && typeof data.report === "object" && !Array.isArray(data.report)) {
+      return data.report as JsonObject
     }
     return data
   }, [report?.data])
 
   const summary = useMemo(() => {
     if (!reportData || typeof reportData !== "object") return null
-    return reportData.summary || null
+    return reportData.summary && typeof reportData.summary === "object"
+      ? reportData.summary as Summary
+      : null
   }, [reportData])
 
   const artifact = useMemo(() => {
     if (!reportData || typeof reportData !== "object") return null
-    return reportData.artifact || null
+    return reportData.artifact && typeof reportData.artifact === "object"
+      ? reportData.artifact as JsonObject
+      : null
   }, [reportData])
 
   const vulnerabilities = useMemo(() => {
     if (!reportData || typeof reportData !== "object") return []
     const vulns = reportData.vulnerabilities
     if (Array.isArray(vulns)) {
-      return vulns
+      return vulns as Vulnerability[]
     }
     return []
   }, [reportData])
@@ -177,7 +206,8 @@ export function ReportDetails({
     if (!reportData || typeof reportData !== "object") return null
     const registryObj = reportData.registry
     if (registryObj && typeof registryObj === "object") {
-      return registryObj.server || null
+      const server = (registryObj as JsonObject).server
+      return typeof server === "string" ? server : null
     }
     return null
   }, [reportData])
@@ -188,10 +218,10 @@ export function ReportDetails({
     if (registry) {
       parts.push(registry)
     }
-    if (artifact.repository) {
+    if (typeof artifact.repository === "string") {
       parts.push(artifact.repository)
     }
-    if (parts.length > 0 && artifact.tag) {
+    if (parts.length > 0 && typeof artifact.tag === "string") {
       return `${parts.join("/")}:${artifact.tag}`
     }
     return parts.length > 0 ? parts.join("/") : null
@@ -201,14 +231,16 @@ export function ReportDetails({
     if (!reportData || typeof reportData !== "object") return []
     const checksData = reportData.checks
     if (Array.isArray(checksData)) {
-      return checksData
+      return checksData as ReportCheck[]
     }
     return []
   }, [reportData])
 
   const scanner = useMemo(() => {
     if (!reportData || typeof reportData !== "object") return null
-    return reportData.scanner || null
+    return reportData.scanner && typeof reportData.scanner === "object"
+      ? reportData.scanner as JsonObject
+      : null
   }, [reportData])
 
   return (
@@ -280,12 +312,19 @@ export function ReportDetails({
               <div className="p-3 rounded-full bg-destructive/10 mb-3">
                 <X className="h-6 w-6 text-destructive" />
               </div>
-              <div className="mb-3 text-sm text-destructive font-medium">Error: {error}</div>
+              <div className="mb-3 text-sm text-destructive font-medium">
+                {errorStatus === 403 ? "Access denied" : errorStatus === 503 ? "Service unavailable" : `Error: ${error}`}
+              </div>
               <Button onClick={handleRetry} size="sm">Retry</Button>
             </div>
           )}
           {report && !loading && !error && (
             <div className="space-y-3">
+              {report.stale && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+                  This detail is from the local cache and may be stale because the cluster is currently unavailable.
+                </div>
+              )}
               <ReportInfoCard
                 report={report}
                 imageRef={imageRef}
