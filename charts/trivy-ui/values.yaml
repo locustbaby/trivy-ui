@@ -8,7 +8,7 @@ image:
   repository: locustbaby/trivy-ui
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "v0.0.3"
+  tag: "v0.0.5"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -25,16 +25,18 @@ serviceAccount:
 
 podAnnotations: {}
 
-podSecurityContext: {}
-  # fsGroup: 2000
+podSecurityContext:
+  fsGroup: 65532
 
-securityContext: {}
-  # capabilities:
-  #   drop:
-  #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
-  # runAsUser: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
 
 service:
   type: ClusterIP
@@ -65,13 +67,6 @@ resources:
     cpu: 100m
     memory: 256Mi
 
-autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 100
-  targetCPUUtilizationPercentage: 80
-  # targetMemoryUtilizationPercentage: 80
-
 nodeSelector: {}
 
 tolerations: []
@@ -84,13 +79,51 @@ env:
   KUBECONFIG_DIR: "/kubeconfigs"
   # STATIC_PATH: Path to static frontend assets
   STATIC_PATH: "trivy-dashboard/dist"
-  # DATA_PATH: Directory for cache and data files (should match cache.mountPath if cache.enabled)
-  DATA_PATH: "/cache"
-  # DEBUG: Enable debug logging
-  DEBUG: "false"
+  # DATA_PATH is managed by the chart from cache.enabled and cache.mountPath.
+  # LOG_LEVEL: debug, info, warning, or error
+  LOG_LEVEL: "info"
+  # CORS_ALLOWED_ORIGINS: Comma-separated browser origins for cross-origin auth
+  CORS_ALLOWED_ORIGINS: ""
+
+# Operator-defined support page shown by the UI on authentication failures,
+# access denials and service unavailability. Rendered natively by the UI
+# from this structured config (no HTML required). For fully custom branding,
+# leave this disabled and provide your own HTML file via the ERROR_PAGE_FILE
+# env var with a manually mounted volume.
+customErrorPage:
+  enabled: false
+  title: "Security dashboard unavailable"
+  message: "Contact the platform team for help:"
+  items: []
+    # - type: email
+    #   label: Email
+    #   value: sec-platform@example.com
+    # - type: link
+    #   label: On-call chat
+    #   value: https://chat.example.com/platform-oncall
+    # - type: link
+    #   label: Runbook
+    #   value: https://wiki.example.com/trivy-ui/runbook
+
+# Application authentication. The default preserves the existing open dashboard.
+auth:
+  mode: none # none | local
+  local:
+    backend: file
+    existingSecret: "trivy-ui-auth"
+    configKey: auth.yaml
+    sessionSecretKey: session-secret
+  session:
+    duration: 12h
+    cookieSecure: true
+    # Empty derives a secure cross-site policy when CORS_ALLOWED_ORIGINS names exact origins.
+    # Set lax, strict, or none to override the derived policy explicitly.
+    cookieSameSite: ""
 
 # Kubeconfig secret configuration
 kubeconfigs:
+  # Whether to mount the kubeconfig Secret into the pod
+  enabled: true
   # Secret name containing kubeconfig files
   secretName: "kubeconfigs"
   # Whether to create the secret (if false, you need to create it manually)
@@ -101,17 +134,38 @@ kubeconfigs:
     # cluster1: <base64-encoded-kubeconfig1>
     # cluster2: <base64-encoded-kubeconfig2>
 
+# Explicit Cluster aliases and credential sources. Leave empty to retain
+# legacy kubeconfig directory discovery.
+clusterSources: {}
+#  incluster:
+#    type: inCluster
+#  prod-b:
+#    type: kubeconfig
+#    key: prod-b.yaml
+
 # Cache storage configuration
 cache:
-  # Enable cache storage using emptyDir
+  # Use a size-limited emptyDir for cache storage. When disabled, the chart uses
+  # an unbounded pod-lifetime writable directory required by the server.
   enabled: true
-  # Mount path for cache directory
+  # Cache mount path; the chart sets DATA_PATH to this same value.
   mountPath: "/cache"
   # Size limit for emptyDir (e.g., "1Gi", "500Mi")
   sizeLimit: "1Gi"
+  summary:
+    maxEntries: 100000
+    snapshotMaxSize: "512Mi"
+  query:
+    maxEntries: 10000
+    maxSize: "64Mi"
+    ttl: "30s"
+  detail:
+    persist: true
+    maxSize: "256Mi"
+    ttl: "10m"
+    staleRetention: "24h"
 
 # RBAC configuration
 rbac:
   # Specifies whether RBAC resources should be created
   create: true
-  # ClusterRole and ClusterRoleBinding will be created if this is true

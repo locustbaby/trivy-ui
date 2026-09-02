@@ -27,6 +27,21 @@ var levelOrder = map[LogLevel]int{
 var currentLevel LogLevel
 
 func init() {
+	SetLogLevel(LevelDebug)
+}
+
+// SetLogLevel configures the global threshold. init() resolves it from
+// LOG_LEVEL; tests may call this to change verbosity at runtime.
+func SetLogLevel(level LogLevel) {
+	switch level {
+	case LevelDebug, LevelInfo, LevelWarning, LevelError:
+		currentLevel = level
+	default:
+		parseFromEnv()
+	}
+}
+
+func parseFromEnv() {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
 	switch raw {
 	case "debug":
@@ -39,6 +54,8 @@ func init() {
 		currentLevel = LevelInfo
 	}
 }
+
+func IsDebugLevel() bool { return currentLevel == LevelDebug }
 
 type LogEntry struct {
 	Timestamp string                 `json:"timestamp"`
@@ -108,14 +125,18 @@ func LogError(message string, fields ...map[string]interface{}) {
 	logJSON(LevelError, message, f)
 }
 
-func LogAccess(clientIP, method, path string, statusCode, size int, duration time.Duration) {
+func LogAccess(requestID, clientIP, username, userAgent, method, path, cluster string, statusCode, size int, duration time.Duration) {
 	fields := map[string]interface{}{
-		"ip":     clientIP,
-		"method": method,
-		"path":   path,
-		"status": statusCode,
-		"size":   size,
-		"ms":     duration.Milliseconds(),
+		"request_id": requestID,
+		"src_ip":     clientIP,
+		"user":       username,
+		"user_agent": userAgent,
+		"method":     method,
+		"path":       path,
+		"cluster":    cluster,
+		"status":     statusCode,
+		"size":       size,
+		"ms":         duration.Milliseconds(),
 	}
 	level := LevelInfo
 	if statusCode >= 500 {

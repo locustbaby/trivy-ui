@@ -10,46 +10,258 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
-  build-and-scan:
+  tests:
+    name: Unit & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Go
+        uses: actions/setup-go@v7
         with:
-          platforms: 'arm64,amd64'
+          go-version-file: go-server/go.mod
+          cache-dependency-path: go-server/go.sum
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: trivy-dashboard/package-lock.json
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+
+      - name: Run Go tests
+        working-directory: go-server
+        run: go test ./...
+
+      - name: Run Go race tests
+        working-directory: go-server
+        run: go test -race ./...
+
+      - name: Run Go vet
+        working-directory: go-server
+        run: go vet ./...
+
+      - name: Check Go formatting
+        working-directory: go-server
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run frontend checks
+        working-directory: trivy-dashboard
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Validate Helm chart
+        run: |
+          helm lint charts/trivy-ui
+          helm template trivy-ui charts/trivy-ui --set auth.mode=none >/tmp/trivy-ui-none.yaml
+          helm template trivy-ui charts/trivy-ui --set auth.mode=local --set auth.local.existingSecret=trivy-ui-auth --set-string env.CORS_ALLOWED_ORIGINS=https://ui.example.com >/tmp/trivy-ui-local.yaml
+          helm template trivy-ui charts/trivy-ui --set cache.enabled=false >/tmp/trivy-ui-cache-disabled.yaml
+          helm template trivy-ui charts/trivy-ui --set cache.mountPath=/var/lib/trivy-ui >/tmp/trivy-ui-cache-custom.yaml
+          helm template trivy-ui charts/trivy-ui --set rbac.create=false >/tmp/trivy-ui-rbac-disabled.yaml
+          test "$(grep -c '^kind: ClusterRole$' /tmp/trivy-ui-none.yaml)" -eq 2
+          test "$(grep -c '^kind: ClusterRoleBinding$' /tmp/trivy-ui-none.yaml)" -eq 2
+          grep -A3 '^kind: ClusterRole$' /tmp/trivy-ui-none.yaml | grep -q '^  name: trivy-ui$'
+          grep -A3 '^kind: ClusterRoleBinding$' /tmp/trivy-ui-none.yaml | grep -q '^  name: trivy-ui$'
+          grep -A1 'name: AUTH_MODE' /tmp/trivy-ui-local.yaml | grep -q 'value: "local"'
+          grep -A1 'name: CORS_ALLOWED_ORIGINS' /tmp/trivy-ui-local.yaml | grep -q 'value: "https://ui.example.com"'
+          grep -A1 'name: DATA_PATH' /tmp/trivy-ui-cache-disabled.yaml | grep -q 'value: "/tmp/trivy-ui-data"'
+          grep -q 'name: runtime-data' /tmp/trivy-ui-cache-disabled.yaml
+          grep -q 'mountPath: "/tmp/trivy-ui-data"' /tmp/trivy-ui-cache-disabled.yaml
+          grep -A1 'name: DATA_PATH' /tmp/trivy-ui-cache-custom.yaml | grep -q 'value: "/var/lib/trivy-ui"'
+          grep -q 'mountPath: "/var/lib/trivy-ui"' /tmp/trivy-ui-cache-custom.yaml
+          test "$(grep -c '^kind: ClusterRole$' /tmp/trivy-ui-rbac-disabled.yaml)" -eq 0
+          test "$(grep -c '^kind: ClusterRoleBinding$' /tmp/trivy-ui-rbac-disabled.yaml)" -eq 0
+
+  e2e-kwok:
+    name: E2E (kwok)
+    runs-on: ubuntu-latest
+    needs: tests
+    timeout-minutes: 25
+
+    env:
+      KWOK_VERSION: v0.7.0
+      KWOK_CLUSTER_A: trivy-ui-e2e-a
+      KWOK_CLUSTER_B: trivy-ui-e2e-b
+      KWOK_KUBE_VERSION_A: v1.30.10
+      KWOK_KUBE_VERSION_B: v1.31.6
+      E2E_BASE_URL: http://127.0.0.1:8099
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go-server/go.mod
+          cache-dependency-path: go-server/go.sum
+
+      - name: Install kwokctl
+        run: |
+          curl -fsSLo /usr/local/bin/kwokctl \
+            "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwokctl-linux-amd64"
+          chmod +x /usr/local/bin/kwokctl
+          kwokctl --version
+
+      - name: Create kwok cluster (real kube-apiserver + etcd)
+        run: |
+          KWOK_KUBE_VERSION="$KWOK_KUBE_VERSION_A" kwokctl create cluster --name "$KWOK_CLUSTER_A" \
+            --runtime docker --timeout 5m
+          KWOK_KUBE_VERSION="$KWOK_KUBE_VERSION_B" kwokctl create cluster --name "$KWOK_CLUSTER_B" \
+            --runtime docker --timeout 5m
+          # The kubeconfig under ~/.kwok references cert paths that only exist
+          # inside the apiserver container; `get kubeconfig` emits a host-usable
+          # one (rewritten cert paths + server address).
+          kwokctl get kubeconfig --name "$KWOK_CLUSTER_A" > /tmp/kwok-kubeconfig-a.yaml
+          kwokctl get kubeconfig --name "$KWOK_CLUSTER_B" > /tmp/kwok-kubeconfig-b.yaml
+          CONTEXT_A=$(KUBECONFIG=/tmp/kwok-kubeconfig-a.yaml kubectl config current-context)
+          CONTEXT_B=$(KUBECONFIG=/tmp/kwok-kubeconfig-b.yaml kubectl config current-context)
+          test -n "$CONTEXT_A"
+          test -n "$CONTEXT_B"
+          wait_for_api() {
+            local config="$1"
+            local cluster="$2"
+            for i in $(seq 1 60); do
+              if KUBECONFIG="$config" kubectl get --raw=/readyz >/dev/null 2>&1; then
+                echo "Kubernetes API ready: $cluster"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::Kubernetes API did not become ready: $cluster"
+            KUBECONFIG="$config" kubectl get --raw=/readyz || true
+            return 1
+          }
+          wait_for_api /tmp/kwok-kubeconfig-a.yaml "$KWOK_CLUSTER_A"
+          wait_for_api /tmp/kwok-kubeconfig-b.yaml "$KWOK_CLUSTER_B"
+          KUBECONFIG=/tmp/kwok-kubeconfig-a.yaml:/tmp/kwok-kubeconfig-b.yaml \
+            kubectl config view --flatten --merge > /tmp/kwok-kubeconfig.yaml
+          KUBECONFIG=/tmp/kwok-kubeconfig.yaml kubectl config use-context "$CONTEXT_A"
+          echo "KUBECONFIG=/tmp/kwok-kubeconfig.yaml" >> "$GITHUB_ENV"
+          echo "E2E_CONTEXTS=$CONTEXT_A,$CONTEXT_B" >> "$GITHUB_ENV"
+
+      - name: Apply Trivy Operator CRDs
+        run: |
+          for config in /tmp/kwok-kubeconfig-a.yaml /tmp/kwok-kubeconfig-b.yaml; do
+            KUBECONFIG="$config" kubectl apply -f go-server/test/e2e/fixtures/crds.yaml
+          done
+
+      - name: Build server binary
+        working-directory: go-server
+        run: go build -o /tmp/trivy-ui-server .
+
+      - name: Start server against kwok cluster
+        working-directory: go-server
+        env:
+          PORT: '8099'
+          DATA_PATH: /tmp/trivy-ui-data
+          STATIC_PATH: /tmp/trivy-ui-static # no UI assets needed for API e2e
+        run: |
+          mkdir -p "$DATA_PATH" "$STATIC_PATH"
+          nohup /tmp/trivy-ui-server > /tmp/trivy-ui-server.log 2>&1 &
+          echo "SERVER_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$E2E_BASE_URL/readyz" || true)
+            if [ "$code" = "200" ]; then echo "server ready"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::server did not become ready"
+          tail -100 /tmp/trivy-ui-server.log
+          exit 1
+
+      - name: Seed reports and run E2E assertions
+        working-directory: go-server
+        run: go test -tags e2e -v -count=1 ./test/e2e/...
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== server log ==="
+          tail -200 /tmp/trivy-ui-server.log || true
+          echo "=== seeded CR counts ==="
+          for config in /tmp/kwok-kubeconfig-a.yaml /tmp/kwok-kubeconfig-b.yaml; do
+            echo "-- $config --"
+            for r in vulnerabilityreports configauditreports exposedsecretreports clustervulnerabilityreports; do
+              echo -n "$r: "; KUBECONFIG="$config" kubectl get "$r" -A --no-headers 2>/dev/null | wc -l || true
+            done
+          done
+          echo "=== clusters ==="
+          curl -s "$E2E_BASE_URL/api/v1/clusters" | head -c 2000 || true
+          echo
+          echo "=== overview ==="
+          curl -s "$E2E_BASE_URL/api/v1/overview" | head -c 2000 || true
+
+      - name: Teardown kwok cluster
+        if: always()
+        run: |
+          kwokctl delete cluster --name "$KWOK_CLUSTER_A" || true
+          kwokctl delete cluster --name "$KWOK_CLUSTER_B" || true
+
+  build-and-scan:
+    runs-on: ubuntu-latest
+    needs: [tests, e2e-kwok]
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: 'arm64,amd64'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Extract branch or tag name and set version
         id: extract_tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref }}
         run: |
           # First, determine the Docker tag
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BRANCH_NAME="${{ github.head_ref }}"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            BRANCH_NAME="$HEAD_REF"
             BRANCH_NAME=$(echo "${BRANCH_NAME}" | sed 's|/|-|g')
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
-          elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
-            BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's|refs/heads/||')
+          elif [[ "$REF_NAME" == refs/heads/* ]]; then
+            BRANCH_NAME=$(echo "$REF_NAME" | sed 's|refs/heads/||')
             BRANCH_NAME=$(echo "${BRANCH_NAME}" | sed 's|/|-|g')
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
-          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG_NAME=$(echo "${{ github.ref }}" | sed 's|refs/tags/||')
+          elif [[ "$REF_NAME" == refs/tags/* ]]; then
+            TAG_NAME=$(echo "$REF_NAME" | sed 's|refs/tags/||')
           else
             TAG_NAME="latest"
           fi
@@ -57,9 +269,9 @@ jobs:
           echo "Docker Tag: $TAG_NAME"
 
           # Now, determine the version for the build
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          if [[ "$REF_NAME" == refs/tags/* ]]; then
             # If this is a tag push, use the tag as the version (without the 'v' prefix for semantic version)
-            VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/v||')
+            VERSION=$(echo "$REF_NAME" | sed 's|refs/tags/v||')
           else
             # For non-tag builds, use a development version based on date and commit
             TIMESTAMP=$(date -u +"%Y%m%d")
@@ -69,21 +281,22 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Build Version: $VERSION"
 
-      - name: Build and Export Docker Image for Scanning
-        uses: docker/build-push-action@v5
+      - name: Build amd64 Docker Image for Scanning
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
           load: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}-scan
+          platforms: linux/amd64
+          tags: trivy-ui:${{ env.TAG }}-scan
           build-args: |
             VERSION=${{ env.VERSION }}
 
       - name: Run Trivy Scan (Before Pushing)
         id: trivy
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}-scan'
+          image-ref: 'trivy-ui:${{ env.TAG }}-scan'
           format: 'json'
           output: trivy-result.json
           ignore-unfixed: true
@@ -106,8 +319,37 @@ jobs:
             echo "found_vuln=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Smoke test the production image
+        run: |
+          docker run --rm --read-only --tmpfs /tmp \
+            --entrypoint /app/go-server trivy-ui:${{ env.TAG }}-scan \
+            hash-password smoke-test >/tmp/trivy-ui-password-hash
+          test -s /tmp/trivy-ui-password-hash
+
+      - name: Build arm64 Docker Image for Scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          platforms: linux/arm64
+          tags: trivy-ui:${{ env.TAG }}-arm64-scan
+          build-args: |
+            VERSION=${{ env.VERSION }}
+
+      - name: Run Trivy Scan for arm64 Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: 'trivy-ui:${{ env.TAG }}-arm64-scan'
+          format: 'json'
+          output: trivy-arm64-result.json
+          ignore-unfixed: true
+          exit-code: 1
+          severity: 'CRITICAL,HIGH'
+
       - name: Set Docker tags
         id: docker_meta
+        if: github.event_name != 'pull_request'
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             # For tag pushes, set both the specific version tag and latest
@@ -119,7 +361,8 @@ jobs:
 
       - name: Build and Push Multi-Architecture Docker Image
         id: docker_build
-        uses: docker/build-push-action@v5
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -131,13 +374,16 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Image digest
+        if: github.event_name != 'pull_request'
         run: echo ${{ steps.docker_build.outputs.digest }}
 
       - name: Inspect image
+        if: github.event_name != 'pull_request'
         run: |
           docker buildx imagetools inspect ${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}
 
       - name: Summary
+        if: github.event_name != 'pull_request'
         run: |
           echo "### Multi-Architecture Docker Image Build Complete 🚀" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

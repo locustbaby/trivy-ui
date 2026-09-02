@@ -24,15 +24,15 @@ Trivy UI provides a centralized dashboard for viewing vulnerability reports gene
 ## Quick Start with Docker Image
 
 ```shell
-docker pull locustbaby/trivy-ui:v0.0.3
+docker pull locustbaby/trivy-ui:v0.0.5
 
 docker run -d \
   -v /path/to/your/kubeconfigs:/kubeconfigs \
   -e KUBECONFIG_DIR=/kubeconfigs \
   -p 8080:8080 \
-  locustbaby/trivy-ui:v0.0.3
+  locustbaby/trivy-ui:v0.0.5
 ```
-- Replace `/path/to/your/kubeconfigs` with the directory containing your kubeconfig files (one per cluster).
+- Replace `/path/to/your/kubeconfigs` with the directory containing your kubeconfig files. Every context in each file is initialized as a separate cluster.
 - Access the dashboard at http://localhost:8080
 
 ---
@@ -44,11 +44,6 @@ docker run -d \
 ```bash
 # Install directly from Docker Hub OCI registry
 helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui
-
-# Or from GitHub Pages
-helm repo add trivy-ui https://locustbaby.github.io/trivy-ui/
-helm repo update
-helm install my-trivy-ui trivy-ui/trivy-ui
 
 # Or from local chart
 git clone https://github.com/locustbaby/trivy-ui.git
@@ -73,6 +68,8 @@ helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui \
 ```
 
 For detailed Helm chart documentation, see [charts/trivy-ui/README.md](charts/trivy-ui/README.md).
+For the user-oriented installation, authentication, and access-control guide,
+see [docs/README.md](docs/README.md).
 
 ---
 
@@ -117,7 +114,7 @@ trivy-ui/
 
 ### Data Flow
 1. Backend discovers Trivy Operator CRDs via K8s API
-2. Informers watch all report types with SetTransform (stores only summary data in memory)
+2. Informers watch every discovered Namespaced and Cluster-scoped report type across each initialized cluster
 3. List API serves paginated results from in-memory cache
 4. Detail API fetches full report from K8s on-demand, caches with 5-10min TTL
 5. Disk cache enables fast pod restarts without re-listing all resources
@@ -131,7 +128,7 @@ trivy-ui/
 
 ```shell
 # Terminal 1: Backend
-cd go-server && go run main.go
+cd go-server && go run .
 
 # Terminal 2: Frontend (proxies API to localhost:8080)
 cd trivy-dashboard && npm install && npm run dev
@@ -139,17 +136,96 @@ cd trivy-dashboard && npm install && npm run dev
 
 Access the frontend dev server at http://localhost:5173
 
+## Testing
+
+Unit tests (pure Go, no cluster needed):
+
+```shell
+cd go-server && go test ./...
+```
+
+End-to-end tests run the real server against a [kwok](https://kwok.sigs.k8s.io)
+cluster (a real kube-apiserver + etcd with fake nodes) seeded with hundreds of
+synthetic report CRs. They verify pagination completeness, order stability
+across refreshes, data correctness against ground truth read back from the API
+server, filters and the error matrix. See `go-server/test/e2e/README.md` for
+local instructions — CI runs them automatically in the `e2e-kwok` job.
+
 ## Configuration
+
+### Cluster-wide collection and user scopes
+
+The backend collects all discovered Trivy report types, including
+Cluster-scoped reports. Helm creates a cluster-wide read-only `ClusterRole` for
+the UI ServiceAccount. When local authentication is enabled, use `scopes` in
+`auth.yaml` to limit each UI user's visible Clusters and Namespaces. Include
+the special namespace `_` when that user should see Cluster-scoped reports.
+Kubernetes RBAC limits the backend ServiceAccount; user scopes limit the
+authenticated UI request.
 
 ### Environment Variables
 
 | Variable         | Description                           | Default              |
 |------------------|---------------------------------------|----------------------|
 | `PORT`           | HTTP port                             | `8080`               |
-| `DEBUG`          | Enable debug logging                  | `false`              |
+| `LOG_LEVEL`      | Logging level (`debug`, `info`, `warning`, `error`) | `info` |
 | `STATIC_PATH`    | Path to frontend assets               | `trivy-dashboard/dist` |
 | `KUBECONFIG_DIR` | Directory containing kubeconfig files | `/kubeconfigs`       |
-| `DATA_PATH`      | Directory for cache persistence       | `/cache`             |
+| `DATA_PATH`      | Directory for cache persistence       | `/tmp/trivy-ui-data` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins. Exact origins enable credentialed cross-origin requests and use `SameSite=None` cookies by default | _(unset)_ |
+| `AUTH_COOKIE_SAME_SITE` | Session-cookie policy: `lax`, `strict`, or `none`. Empty derives a safe default from CORS configuration; `none` requires `AUTH_COOKIE_SECURE=true` | `lax` |
+| `ERROR_PAGE_CONFIG` | Structured JSON (`{"title","message","items":[{"type":"email\|link","label","value"}]}`) for the support page shown on auth/access/availability errors. Rendered natively by the UI; preferred over `ERROR_PAGE_FILE` | _(unset)_ |
+| `ERROR_PAGE_FILE`| Path to an operator-provided HTML file served publicly at `/error-page.html` — escape hatch for fully custom branding. Hot-reloaded on change; rendered with the same trust level as the app itself, so never point it at user-writable storage | _(unset)_ |
+
+#### Custom error page (Kubernetes / Helm)
+
+The recommended way is structured config in Helm values — no HTML required:
+
+```yaml
+customErrorPage:
+  enabled: true
+  title: "Security dashboard unavailable"
+  message: "Contact the platform team for help:"
+  items:
+    - type: email
+      label: Email
+      value: sec-platform@example.com
+    - type: link
+      label: On-call chat
+      value: https://chat.example.com/platform-oncall
+    - type: link
+      label: Runbook
+      value: https://wiki.example.com/trivy-ui/runbook
+```
+
+Edit `values.yaml` (or a custom values file) and run `helm upgrade` to apply.
+
+A ready-to-use raw-HTML template lives at [`examples/error-page.example.html`](./examples/error-page.example.html) for the `ERROR_PAGE_FILE` escape hatch:
+
+```shell
+docker run -d -v /path/to/error-page.html:/app/error-page.html:ro \
+  -e ERROR_PAGE_FILE=/app/error-page.html -p 8080:8080 locustbaby/trivy-ui:v0.0.5
+```
+
+### Error Codes
+
+Every API error response carries a machine-readable code in `error.type`, plus
+the `X-Request-ID` header value in `error.requestId` for log correlation:
+
+```json
+{"code":1,"message":"report access denied","error":{"type":"ACCESS_DENIED","requestId":"..."}}
+```
+
+| Code | Meaning |
+|------|---------|
+| `INTERNAL_ERROR` | Unexpected server-side failure |
+| `VALIDATION_FAILED` | Invalid request parameters |
+| `AUTH_REQUIRED` | Not authenticated (session missing/expired) or login rejected |
+| `ACCESS_DENIED` | Authenticated but outside namespace/cluster scope |
+| `REPORT_NOT_FOUND` | Report does not exist |
+| `REPORT_AMBIGUOUS` | Reference matches multiple reports; narrow the query |
+| `PROVIDER_UNAVAILABLE` | Cluster client unavailable or upstream fetch failed |
+| `DATA_INCOMPLETE` | Cache capacity exceeded; data may be partial |
 
 ## API Reference
 
@@ -157,12 +233,12 @@ Access the frontend dev server at http://localhost:5173
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/v1/type` | List all discovered report types |
-| `GET` | `/api/v1/type/{type}` | List reports by type (paginated) |
-| `GET` | `/api/v1/type/{type}/{name}` | Get full report details |
-| `GET` | `/api/clusters` | List all clusters |
-| `GET` | `/api/clusters/{cluster}/namespaces` | List namespaces |
-| `GET` | `/api/cache/stats` | Cache statistics |
+| `GET` | `/api/v1/report-types` | List discovered report types |
+| `GET` | `/api/v1/reports?type={type}` | List reports by type (paginated) |
+| `GET` | `/api/v1/reports/{cluster}/{type}/{namespace}/{name}` | Get full report details; use `_` for Cluster-scoped reports |
+| `GET` | `/api/v1/clusters` | List accessible clusters |
+| `GET` | `/api/v1/clusters/{cluster}/namespaces` | List accessible namespaces |
+| `GET` | `/api/cache/stats` | Cache statistics when local auth is disabled |
 | `GET` | `/healthz` | Health check |
 | `GET` | `/readyz` | Readiness check |
 
@@ -171,9 +247,10 @@ Access the frontend dev server at http://localhost:5173
 | Parameter | Description | Example |
 |-----------|-------------|---------|
 | `cluster` | Filter by cluster | `?cluster=prod` |
-| `namespace` | Filter by namespace (comma-separated) | `?namespace=default,kube-system` |
-| `page` | Page number | `?page=2` |
-| `pageSize` | Items per page (max 200) | `?pageSize=50` |
+| `namespace` | Filter by one or more namespaces | `?namespace=team-a,team-b` |
+| `search` | Search report name, cluster, namespace or artifact | `?search=nginx` |
+| `onlyVulnerable` | Include only reports with findings | `?onlyVulnerable=true` |
+| `page` / `pageSize` | Pagination controls | `?page=2&pageSize=50` |
 
 ## License
 

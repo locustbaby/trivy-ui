@@ -72,7 +72,7 @@ export function MultiCombobox({
     }
   }
 
-  const handleRemove = (optionValue: string, e: React.MouseEvent) => {
+  const handleRemove = (optionValue: string, e: React.MouseEvent | React.KeyboardEvent) => {
     e.stopPropagation()
     const newValue = value.filter((v) => v !== optionValue)
     onValueChange?.(newValue)
@@ -102,7 +102,7 @@ export function MultiCombobox({
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault()
-                      handleRemove(option.value, e as any)
+                      handleRemove(option.value, e)
                     }
                   }}
                   role="button"

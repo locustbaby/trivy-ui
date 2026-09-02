@@ -3,7 +3,7 @@ import { Button } from "../ui/button"
 import { Search, ChevronDown, ChevronUp, ChevronsUpDown } from "lucide-react"
 import { getSeverityColor, getSeverityBgColor, getSeverityBadgeColor } from "../../lib/severity"
 
-interface Check {
+export interface Check {
   checkID?: string
   id?: string
   title?: string

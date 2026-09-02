@@ -5,24 +5,73 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"trivy-ui/auth"
 )
 
 type stubCacheService struct {
 	reports map[string][]Report
+	trends  []TrendRecord
 }
 
-func (s *stubCacheService) Get(key string) (interface{}, bool)        { return nil, false }
-func (s *stubCacheService) Items() map[string]interface{}             { return nil }
-func (s *stubCacheService) ItemsByType(t string) map[string]interface{} { return nil }
+func (s *stubCacheService) Get(key string) (interface{}, bool)                 { return nil, false }
+func (s *stubCacheService) Items() map[string]interface{}                      { return nil }
+func (s *stubCacheService) ItemsByType(t string) map[string]interface{}        { return nil }
 func (s *stubCacheService) Set(key string, value interface{}, _ time.Duration) {}
-func (s *stubCacheService) Delete(key string)                         {}
-func (s *stubCacheService) DeleteReportEntry(_, _, _, _ string)       {}
-func (s *stubCacheService) GetReportCount(_, _ string) (int, int)     { return 0, 0 }
-func (s *stubCacheService) GetOverviewData(_ string) *ClusterOverview { return nil }
-func (s *stubCacheService) GetTrends(_ string, _ int) []TrendRecord   { return nil }
-func (s *stubCacheService) GetStats() map[string]interface{}          { return nil }
+func (s *stubCacheService) Delete(key string)                                  {}
+func (s *stubCacheService) DeleteReportEntry(_, _, _, _ string)                {}
+func (s *stubCacheService) GetReportCount(_, _ string) (int, int)              { return 0, 0 }
+func (s *stubCacheService) GetOverviewData(_ string) *ClusterOverview          { return nil }
+func (s *stubCacheService) GetTrends(_ string, _ int) []TrendRecord {
+	return append([]TrendRecord(nil), s.trends...)
+}
+func (s *stubCacheService) GetStats() map[string]interface{} { return nil }
 func (s *stubCacheService) GetReports(typeName, clusterFilter string, namespaceFilters []string) []Report {
-	return s.reports[typeName]
+	return s.GetRawReportsByType(typeName, clusterFilter, namespaceFilters)
+}
+func (s *stubCacheService) GetRawReportsByType(typeName, clusterFilter string, namespaceFilters []string) []Report {
+	// Mirror the real cache behaviour: cluster and namespace filters are
+	// applied when reports are fetched from the cache, before buildIndex runs.
+	filtered := make([]Report, 0)
+	for _, report := range s.reports[typeName] {
+		if clusterFilter != "" && report.Cluster != clusterFilter {
+			continue
+		}
+		if len(namespaceFilters) > 0 {
+			match := false
+			for _, ns := range namespaceFilters {
+				if report.Namespace == ns {
+					match = true
+					break
+				}
+			}
+			// Cluster-scoped reports bypass namespace filters.
+			if !match && report.Namespace != "" {
+				continue
+			}
+		}
+		filtered = append(filtered, report)
+	}
+	return filtered
+}
+func (s *stubCacheService) GetReportsByRefs(refs []ReportRef) ([]Report, int) {
+	byRef := make(map[ReportRef]Report)
+	for _, reports := range s.reports {
+		for _, report := range reports {
+			report = ensureReportRef(report)
+			byRef[report.Ref] = report
+		}
+	}
+	items := make([]Report, 0, len(refs))
+	missing := 0
+	for _, ref := range refs {
+		if report, ok := byRef[ref]; ok {
+			items = append(items, report)
+		} else {
+			missing++
+		}
+	}
+	return items, missing
 }
 
 func makeReport(name, cluster, ns, typ string, critical float64) Report {
@@ -48,27 +97,27 @@ func makeReportWithArtifact(name, cluster, ns, typ, repository string) Report {
 	return Report{Name: name, Cluster: cluster, Namespace: ns, Type: typ, Data: data, UpdatedAt: time.Now()}
 }
 
-func TestPaginateReports_Empty(t *testing.T) {
-	result := paginateReports(nil, 1, 10)
+func TestPaginateRefs_Empty(t *testing.T) {
+	result := paginateRefs(nil, 1, 10)
 	if len(result) != 0 {
 		t.Fatalf("expected 0 got %d", len(result))
 	}
 }
 
-func TestPaginateReports_SinglePage(t *testing.T) {
-	reports := make([]Report, 5)
-	result := paginateReports(reports, 1, 10)
+func TestPaginateRefs_SinglePage(t *testing.T) {
+	refs := make([]ReportRef, 5)
+	result := paginateRefs(refs, 1, 10)
 	if len(result) != 5 {
 		t.Fatalf("expected 5 got %d", len(result))
 	}
 }
 
-func TestPaginateReports_SecondPage(t *testing.T) {
-	reports := make([]Report, 25)
-	for i := range reports {
-		reports[i].Name = fmt.Sprintf("r%d", i)
+func TestPaginateRefs_SecondPage(t *testing.T) {
+	refs := make([]ReportRef, 25)
+	for i := range refs {
+		refs[i].Name = fmt.Sprintf("r%d", i)
 	}
-	result := paginateReports(reports, 2, 10)
+	result := paginateRefs(refs, 2, 10)
 	if len(result) != 10 {
 		t.Fatalf("expected 10 got %d", len(result))
 	}
@@ -77,19 +126,29 @@ func TestPaginateReports_SecondPage(t *testing.T) {
 	}
 }
 
-func TestPaginateReports_LastPagePartial(t *testing.T) {
-	reports := make([]Report, 25)
-	result := paginateReports(reports, 3, 10)
+func TestPaginateRefs_LastPagePartial(t *testing.T) {
+	refs := make([]ReportRef, 25)
+	result := paginateRefs(refs, 3, 10)
 	if len(result) != 5 {
 		t.Fatalf("expected 5 got %d", len(result))
 	}
 }
 
-func TestPaginateReports_OutOfBounds(t *testing.T) {
-	reports := make([]Report, 5)
-	result := paginateReports(reports, 10, 10)
+func TestPaginateRefs_OutOfBounds(t *testing.T) {
+	refs := make([]ReportRef, 5)
+	result := paginateRefs(refs, 10, 10)
 	if len(result) != 0 {
 		t.Fatalf("expected 0 got %d", len(result))
+	}
+}
+
+func TestPaginateRefs_InvalidArguments(t *testing.T) {
+	refs := make([]ReportRef, 5)
+	if got := paginateRefs(refs, 0, 10); len(got) != 0 {
+		t.Fatalf("expected empty result for page zero, got %d", len(got))
+	}
+	if got := paginateRefs(refs, 1, 0); len(got) != 0 {
+		t.Fatalf("expected empty result for page size zero, got %d", len(got))
 	}
 }
 
@@ -136,10 +195,40 @@ func TestReportMatchesSearch_CaseInsensitive(t *testing.T) {
 }
 
 func newQuerySvc(reports []Report, typeName string) QueryService {
+	queryResultCache.Range(func(key string, _ SortedRefIndex) bool {
+		queryResultCache.Delete(key)
+		return true
+	})
 	stub := &stubCacheService{
 		reports: map[string][]Report{typeName: reports},
 	}
 	return NewQueryService(stub)
+}
+
+func TestListReports_UserScopeExcludesClusterScopedAndOtherNamespaces(t *testing.T) {
+	stub := &stubCacheService{reports: map[string][]Report{
+		"vulnerabilityreports": {
+			makeReport("allowed", "cluster-a", "team-a", "vulnerabilityreports", 1),
+			makeReport("forbidden", "cluster-a", "team-b", "vulnerabilityreports", 1),
+		},
+		"clustervulnerabilityreports": {
+			makeReport("cluster-report", "cluster-a", "", "clustervulnerabilityreports", 1),
+		},
+	}}
+	svc := NewQueryService(stub)
+	access := auth.NewAccessSnapshot(
+		auth.UnrestrictedScope(),
+		auth.NewScopeSnapshot([]auth.ScopeRule{{Cluster: "cluster-a", Namespaces: []string{"team-a"}}}),
+	)
+
+	result := svc.ListReports(ReportQuery{Type: "vulnerabilityreports", Page: 1, PageSize: 50, Access: access})
+	if result.Total != 1 || len(result.Items) != 1 || result.Items[0].Name != "allowed" {
+		t.Fatalf("restricted query returned total=%d items=%v", result.Total, result.Items)
+	}
+	clusterResult := svc.ListReports(ReportQuery{Type: "clustervulnerabilityreports", Page: 1, PageSize: 50, Access: access})
+	if clusterResult.Total != 0 || len(clusterResult.Items) != 0 {
+		t.Fatalf("restricted query returned cluster-scoped reports: %+v", clusterResult)
+	}
 }
 
 func TestListReports_All(t *testing.T) {
@@ -206,10 +295,8 @@ func TestListReports_Pagination(t *testing.T) {
 
 func TestListReports_Empty(t *testing.T) {
 	const emptyType = "empty-type-no-data"
-	queryResultCache.Range(func(k, _ any) bool {
-		if key, ok := k.(string); ok && len(key) > len(emptyType) && key[:len(emptyType)] == emptyType {
-			queryResultCache.Delete(k)
-		}
+	queryResultCache.Range(func(key string, _ SortedRefIndex) bool {
+		queryResultCache.Delete(key)
 		return true
 	})
 	svc := newQuerySvc(nil, emptyType)
@@ -221,8 +308,8 @@ func TestListReports_Empty(t *testing.T) {
 
 func TestQueryResultCacheKey_Deterministic(t *testing.T) {
 	q := ReportQuery{Type: "vuln", Cluster: "c", Namespaces: []string{"ns"}, Search: "foo", OnlyVulnerable: true, Page: 1, PageSize: 10}
-	k1 := queryResultCacheKey(q, 5)
-	k2 := queryResultCacheKey(q, 5)
+	k1 := refIndexCacheKey(q, 5)
+	k2 := refIndexCacheKey(q, 5)
 	if k1 != k2 {
 		t.Fatalf("cache key not deterministic: %s vs %s", k1, k2)
 	}
@@ -230,9 +317,56 @@ func TestQueryResultCacheKey_Deterministic(t *testing.T) {
 
 func TestQueryResultCacheKey_VersionDistinct(t *testing.T) {
 	q := ReportQuery{Type: "vuln", Page: 1, PageSize: 10}
-	k1 := queryResultCacheKey(q, 1)
-	k2 := queryResultCacheKey(q, 2)
+	k1 := refIndexCacheKey(q, 1)
+	k2 := refIndexCacheKey(q, 2)
 	if k1 == k2 {
 		t.Fatal("different versions should produce different cache keys")
+	}
+}
+
+func TestRefIndexCacheKey_NormalizesNamespaces(t *testing.T) {
+	q1 := ReportQuery{Type: "vuln", Namespaces: []string{"ns-b", "ns-a", "ns-a"}}
+	q2 := ReportQuery{Type: "vuln", Namespaces: []string{"ns-a", "ns-b"}}
+	if refIndexCacheKey(q1, 7) != refIndexCacheKey(q2, 7) {
+		t.Fatal("equivalent namespace filters should share a cache key")
+	}
+}
+
+func TestGetTrendsForScope_AggregatesAuthorizedFleetAndClusterReports(t *testing.T) {
+	bucket := time.Now().UTC().Truncate(time.Hour)
+	cache := &stubCacheService{trends: []TrendRecord{
+		{Timestamp: bucket, Critical: 100},
+		{Timestamp: bucket, Cluster: "prod", Critical: 100},
+		{Timestamp: bucket, Cluster: "prod", Namespace: "team-a", Critical: 2, High: 3},
+		{Timestamp: bucket, Cluster: "prod", Namespace: "team-b", Critical: 50},
+		{Timestamp: bucket, Cluster: "prod", Namespace: auth.ClusterScopedNamespace, Critical: 7, High: 11},
+	}}
+	h := NewHandler(nil, cache, nil, NewQueryService(cache), nil, nil, nil)
+	scope := auth.NewAccessSnapshot(
+		auth.NewScopeSnapshot([]auth.ScopeRule{{Cluster: "prod", Namespaces: []string{"team-a", auth.ClusterScopedNamespace}}}),
+		auth.UnrestrictedScope(),
+	)
+
+	got := h.getTrendsForScope("", 30, scope)
+	if len(got) != 2 {
+		t.Fatalf("got %d trends, want fleet and prod aggregates: %+v", len(got), got)
+	}
+	byCluster := make(map[string]TrendRecord, len(got))
+	for _, trend := range got {
+		byCluster[trend.Cluster] = trend
+	}
+	for _, cluster := range []string{"", "prod"} {
+		trend, ok := byCluster[cluster]
+		if !ok {
+			t.Fatalf("missing %q aggregate in %+v", cluster, got)
+		}
+		if trend.Critical != 9 || trend.High != 14 || trend.Namespace != "" {
+			t.Errorf("%q aggregate = %+v, want critical=9 high=14 without namespace", cluster, trend)
+		}
+	}
+
+	clusterOnly := h.getTrendsForScope("prod", 30, scope)
+	if len(clusterOnly) != 1 || clusterOnly[0].Cluster != "prod" || clusterOnly[0].Critical != 9 || clusterOnly[0].High != 14 {
+		t.Fatalf("cluster trend = %+v, want one prod aggregate with authorized totals", clusterOnly)
 	}
 }

@@ -1,0 +1,12 @@
+.git
+.github
+.codex
+.agents
+docs
+trivy-dashboard/node_modules
+trivy-dashboard/dist
+go-server/api/trend-history.json
+go-server/api/.trivy-ui-*.tmp
+*.log
+*.tmp
+*.swp

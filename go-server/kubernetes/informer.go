@@ -24,6 +24,7 @@ type CacheUpdater interface {
 	DecrementCount(cluster, namespace, reportType string, hasVuln bool)
 	AdjustVulnCount(cluster, namespace, reportType string, delta int)
 	UpdateSyncState(clusterName string, state string)
+	MarkClusterReconciled(clusterName string)
 }
 
 type ReportInformerManager struct {
@@ -34,9 +35,14 @@ type ReportInformerManager struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	cacheUpdater CacheUpdater
+	registry     *config.CRDRegistry
 }
 
 func NewReportInformerManager(client *Client, clusterName string, cacheUpdater CacheUpdater) *ReportInformerManager {
+	return NewReportInformerManagerWithRegistry(client, clusterName, cacheUpdater, config.GetGlobalRegistry())
+}
+
+func NewReportInformerManagerWithRegistry(client *Client, clusterName string, cacheUpdater CacheUpdater, registry *config.CRDRegistry) *ReportInformerManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ReportInformerManager{
 		client:       client,
@@ -45,11 +51,12 @@ func NewReportInformerManager(client *Client, clusterName string, cacheUpdater C
 		ctx:          ctx,
 		cancel:       cancel,
 		cacheUpdater: cacheUpdater,
+		registry:     registry,
 	}
 }
 
 func (m *ReportInformerManager) Start() error {
-	registry := config.GetGlobalRegistry()
+	registry := m.registry
 	reports := registry.GetAllReports()
 
 	if len(reports) == 0 {
@@ -67,15 +74,8 @@ func (m *ReportInformerManager) Start() error {
 	// 10 minutes is a good balance between freshness and API load
 	resyncPeriod := 10 * time.Minute
 
-	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
-		m.client.dynamic,
-		resyncPeriod,
-		metav1.NamespaceAll,
-		nil,
-	)
-
 	for _, reportType := range reports {
-		reportType := reportType // Create local copy to avoid closure capture issue
+		reportType := reportType
 		group, version := parseAPIVersion(reportType.APIVersion)
 		gvr := schema.GroupVersionResource{
 			Group:    group,
@@ -83,40 +83,25 @@ func (m *ReportInformerManager) Start() error {
 			Resource: reportType.Name,
 		}
 
-		informer := factory.ForResource(gvr).Informer()
-
-		if err := informer.SetTransform(stripLargeFields); err != nil {
-			utils.LogWarning("Failed to set transform on informer", map[string]interface{}{
-				"reportType": reportType.Name,
-				"error":      err.Error(),
-			})
+		if _, exists := m.informers[reportType.Name]; exists {
+			continue
 		}
-
+		factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(m.client.dynamic, resyncPeriod, metav1.NamespaceAll, nil)
+		informer := factory.ForResource(gvr).Informer()
+		if err := informer.SetTransform(stripLargeFields); err != nil {
+			utils.LogWarning("Failed to set transform on informer", map[string]interface{}{"reportType": reportType.Name, "error": err.Error()})
+		}
 		informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				m.onAdd(reportType, obj)
-			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
-				m.onUpdate(reportType, oldObj, newObj)
-			},
-			DeleteFunc: func(obj interface{}) {
-				m.onDelete(reportType, obj)
-			},
+			AddFunc:    func(obj interface{}) { m.onAdd(reportType, obj) },
+			UpdateFunc: func(oldObj, newObj interface{}) { m.onUpdate(reportType, oldObj, newObj) },
+			DeleteFunc: func(obj interface{}) { m.onDelete(reportType, obj) },
 		})
-
-		// Set error handler to log watch errors (helps debug stream errors)
 		informer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
-			utils.LogWarning("Informer watch error, will retry", map[string]interface{}{
-				"cluster":    m.clusterName,
-				"reportType": reportType.Name,
-				"error":      err.Error(),
-			})
+			utils.LogWarning("Informer watch error, will retry", map[string]interface{}{"cluster": m.clusterName, "reportType": reportType.Name, "error": err.Error()})
 		})
-
 		m.informers[reportType.Name] = informer
+		factory.Start(m.ctx.Done())
 	}
-
-	factory.Start(m.ctx.Done())
 
 	syncTimeout := 2 * time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), syncTimeout)
@@ -168,30 +153,9 @@ func (m *ReportInformerManager) Start() error {
 	} else {
 		if m.cacheUpdater != nil {
 			m.cacheUpdater.UpdateSyncState(m.clusterName, "FullySynced")
+			m.cacheUpdater.MarkClusterReconciled(m.clusterName)
 		}
 	}
-
-	var loadWg sync.WaitGroup
-	for _, reportType := range reports {
-		informer, ok := m.informers[reportType.Name]
-		if !ok || !informer.HasSynced() {
-			continue
-		}
-		items := informer.GetStore().List()
-		utils.LogInfo("Loading existing resources from informer cache", map[string]interface{}{
-			"cluster":    m.clusterName,
-			"reportType": reportType.Name,
-			"count":      len(items),
-		})
-		loadWg.Add(1)
-		go func(rt config.ReportKind, items []interface{}) {
-			defer loadWg.Done()
-			for _, item := range items {
-				m.onAdd(rt, item)
-			}
-		}(reportType, items)
-	}
-	loadWg.Wait()
 
 	utils.LogInfo("Started informers for report types", map[string]interface{}{
 		"cluster": m.clusterName,
@@ -251,40 +215,23 @@ func (m *ReportInformerManager) onAdd(reportType config.ReportKind, obj interfac
 	report := m.convertToReport(reportType, unstructuredObj)
 	if report != nil && m.cacheUpdater != nil {
 		m.cacheUpdater.SetReport(m.clusterName, report.Namespace, report.Type, report.Name, report)
-		// Update counters
-		hasVuln := m.hasVulnerabilities(unstructuredObj.Object)
-		m.cacheUpdater.IncrementCount(m.clusterName, report.Namespace, report.Type, hasVuln)
 	}
 }
 
-func (m *ReportInformerManager) onUpdate(reportType config.ReportKind, oldObj, newObj interface{}) {
-	oldUnstructured, oldOk := oldObj.(*unstructured.Unstructured)
+func (m *ReportInformerManager) onUpdate(reportType config.ReportKind, _, newObj interface{}) {
 	newUnstructured, newOk := newObj.(*unstructured.Unstructured)
-	if !oldOk || !newOk {
+	if !newOk {
 		return
 	}
 	report := m.convertToReport(reportType, newUnstructured)
 	if report != nil && m.cacheUpdater != nil {
 		m.cacheUpdater.SetReport(m.clusterName, report.Namespace, report.Type, report.Name, report)
 		m.cacheUpdater.InvalidateReportDetail(m.clusterName, report.Namespace, report.Type, report.Name)
-
-		// Check if vulnerability status changed and adjust counters
-		oldHasVuln := m.hasVulnerabilities(oldUnstructured.Object)
-		newHasVuln := m.hasVulnerabilities(newUnstructured.Object)
-		if oldHasVuln != newHasVuln {
-			if newHasVuln {
-				// Changed from no vulnerabilities to has vulnerabilities
-				m.cacheUpdater.AdjustVulnCount(m.clusterName, report.Namespace, report.Type, 1)
-			} else {
-				// Changed from has vulnerabilities to no vulnerabilities
-				m.cacheUpdater.AdjustVulnCount(m.clusterName, report.Namespace, report.Type, -1)
-			}
-		}
 	}
 }
 
 func (m *ReportInformerManager) onDelete(reportType config.ReportKind, obj interface{}) {
-	unstructuredObj, ok := obj.(*unstructured.Unstructured)
+	unstructuredObj, ok := deletedUnstructured(obj)
 	if !ok {
 		return
 	}
@@ -295,6 +242,18 @@ func (m *ReportInformerManager) onDelete(reportType config.ReportKind, obj inter
 	}
 }
 
+func deletedUnstructured(obj interface{}) (*unstructured.Unstructured, bool) {
+	if unstructuredObj, ok := obj.(*unstructured.Unstructured); ok {
+		return unstructuredObj, true
+	}
+	tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+	if !ok {
+		return nil, false
+	}
+	unstructuredObj, ok := tombstone.Obj.(*unstructured.Unstructured)
+	return unstructuredObj, ok
+}
+
 func (m *ReportInformerManager) convertToReport(reportType config.ReportKind, obj *unstructured.Unstructured) *Report {
 	status := m.extractStatus(obj.Object)
 
@@ -303,12 +262,13 @@ func (m *ReportInformerManager) convertToReport(reportType config.ReportKind, ob
 	summaryData := m.extractSummaryData(obj.Object)
 
 	return &Report{
-		Type:      reportType.Name,
-		Cluster:   m.clusterName,
-		Namespace: obj.GetNamespace(),
-		Name:      obj.GetName(),
-		Status:    status,
-		Data:      summaryData,
+		Type:            reportType.Name,
+		Cluster:         m.clusterName,
+		Namespace:       obj.GetNamespace(),
+		Name:            obj.GetName(),
+		ResourceVersion: obj.GetResourceVersion(),
+		Status:          status,
+		Data:            summaryData,
 	}
 }
 

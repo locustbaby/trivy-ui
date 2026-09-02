@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react"
+import * as React from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { api } from "../api/client"
 import type { ClusterOverview, TrendRecord, Cluster } from "../api/client"
-import { Shield, Server, Activity, ShieldCheck, Loader2 } from "lucide-react"
+import { Shield, Server, Activity, ShieldCheck, Loader2, X } from "lucide-react"
+import { Button } from "./ui/button"
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts"
 
 interface GlobalHubProps {
@@ -9,70 +11,103 @@ interface GlobalHubProps {
   onSelectCluster: (cluster: string) => void
 }
 
-export function GlobalHub({ clusters, onSelectCluster }: GlobalHubProps) {
+function GlobalHubInternal({ clusters, onSelectCluster }: GlobalHubProps) {
   const [globalData, setGlobalData] = useState<ClusterOverview | null>(null)
   const [globalTrends, setGlobalTrends] = useState<TrendRecord[]>([])
   const [clusterTrends, setClusterTrends] = useState<Record<string, TrendRecord[]>>({})
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string>()
+  const [retryCount, setRetryCount] = useState(0)
+  const generationRef = useRef(0)
+  const clustersRef = useRef(clusters)
+  clustersRef.current = clusters
+  const clusterKey = clusters.map((cluster) => cluster.name).join("\x00")
 
   useEffect(() => {
-    const load = async () => {
+    const generation = ++generationRef.current
+    const controller = new AbortController()
+	    const load = async () => {
       setLoading(true)
+      setError(undefined)
       try {
         const [ovData, trData] = await Promise.all([
-          api.getOverview(),
-          api.getOverviewTrends()
+          api.getOverview(undefined, controller.signal),
+          api.getOverviewTrends(undefined, 30, controller.signal)
         ])
-        setGlobalData(ovData)
-        setGlobalTrends(trData)
+	        if (generation !== generationRef.current) return
+	        setGlobalData(ovData)
+	        setGlobalTrends(trData.filter((point) => point.cluster === "" && !point.namespace))
 
-        // Fetch mini trends for all clusters in parallel
-        if (clusters.length > 0) {
-          const trendsMap: Record<string, TrendRecord[]> = {}
-          await Promise.all(
-            clusters.map(async (c) => {
-              const ct = await api.getOverviewTrends(c.name)
-              trendsMap[c.name] = ct
-            })
-          )
-          setClusterTrends(trendsMap)
-        }
+	        if (generation === generationRef.current) {
+	          const trendsMap: Record<string, TrendRecord[]> = {}
+          for (const clusterName of clustersRef.current.map((cluster) => cluster.name)) {
+            trendsMap[clusterName] = trData.filter((point) => point.cluster === clusterName && !point.namespace)
+          }
+          if (generation === generationRef.current) setClusterTrends(trendsMap)
+	        }
       } catch (e) {
-        console.error(e)
+        if (!(e instanceof Error && e.name === "AbortError")) {
+          if (generation === generationRef.current) {
+            setError(e instanceof Error ? e.message : "Failed to load fleet overview")
+          }
+        }
       } finally {
-        setLoading(false)
+        if (generation === generationRef.current) setLoading(false)
       }
     }
     load()
-  }, [clusters])
+    return () => controller.abort()
+  }, [clusterKey, retryCount])
 
-  if (loading) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-4 text-muted-foreground">
-          <Loader2 className="h-10 w-10 animate-spin" />
-          <p>Loading Fleet Overview...</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!globalData) return null
-
-  const chartData = globalTrends.map(t => {
+	const chartData = useMemo(() => globalTrends.map(t => {
     const d = new Date(t.timestamp)
     return {
       name: `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:00`,
       critical: t.critical,
       high: t.high,
     }
-  })
+  }), [globalTrends])
+
+	const clusterHealth = useMemo(() => {
+		return new Map((globalData?.vulnerable_clusters || []).map((cluster) => [cluster.name, cluster]))
+	}, [globalData?.vulnerable_clusters])
+
+  const miniTrends = useMemo(() => {
+    return Object.fromEntries(Object.entries(clusterTrends).map(([name, trend]) => [
+      name,
+      trend.map((point) => ({ value: point.critical + point.high })),
+    ])) as Record<string, { value: number }[]>
+  }, [clusterTrends])
 
   // Format cluster specific mini-trends
-  const getMiniSparkline = (cname: string) => {
-    const trends = clusterTrends[cname] || []
-    return trends.map(t => ({ value: t.critical + t.high }))
-  }
+	const getMiniSparkline = (cname: string) => {
+		return miniTrends[cname] || []
+	}
+
+	if (loading) {
+		return (
+			<div className="flex h-screen items-center justify-center bg-background">
+				<div className="flex flex-col items-center gap-4 text-muted-foreground">
+					<Loader2 className="h-10 w-10 animate-spin" />
+					<p>Loading Fleet Overview...</p>
+				</div>
+			</div>
+		)
+	}
+
+	if (!globalData && error && !loading) {
+		return (
+			<div className="flex min-h-screen items-center justify-center bg-background">
+				<div className="flex flex-col items-center gap-4 p-8 rounded-2xl bg-card border shadow-xl max-w-md">
+					<X className="h-12 w-12 text-destructive mb-1" />
+					<div className="text-destructive font-medium">{error}</div>
+					<Button onClick={() => setRetryCount((count) => count + 1)} size="sm">Retry</Button>
+				</div>
+			</div>
+		)
+	}
+
+	if (!globalData) return null
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/30 overflow-y-auto scrollbar-thin">
@@ -141,8 +176,7 @@ export function GlobalHub({ clusters, onSelectCluster }: GlobalHubProps) {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             {clusters.map((c) => {
-              // Find health data for this cluster
-              const healthData = globalData.vulnerable_clusters?.find(vc => vc.name === c.name)
+              const healthData = clusterHealth.get(c.name)
               const crit = healthData?.critical || 0
               const high = healthData?.high || 0
               const sparklineData = getMiniSparkline(c.name)
@@ -198,3 +232,5 @@ export function GlobalHub({ clusters, onSelectCluster }: GlobalHubProps) {
     </div>
   )
 }
+
+export const GlobalHub = React.memo(GlobalHubInternal)

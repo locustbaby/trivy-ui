@@ -67,3 +67,22 @@ Create the namespace name
 {{- define "trivy-ui.namespace" -}}
 {{- default .Release.Namespace .Values.namespace }}
 {{- end }}
+
+{{- define "trivy-ui.authSecretChecksum" -}}
+{{- $secret := lookup "v1" "Secret" (include "trivy-ui.namespace" .) .Values.auth.local.existingSecret -}}
+{{- if $secret }}{{ sha256sum (toJson $secret.data) }}{{ else }}{{ .Values.auth.local.existingSecret | sha256sum }}{{ end }}
+{{- end }}
+
+{{- define "trivy-ui.kubeconfigSecretChecksum" -}}
+{{- $secret := lookup "v1" "Secret" (include "trivy-ui.namespace" .) .Values.kubeconfigs.secretName -}}
+{{- if $secret }}{{ sha256sum (toJson $secret.data) }}{{ else }}{{ toJson .Values.kubeconfigs.data | sha256sum }}{{ end }}
+{{- end }}
+
+{{- define "trivy-ui.errorPageConfig" -}}
+{{- $cfg := dict "title" (.Values.customErrorPage.title | default "Security dashboard unavailable") "message" (.Values.customErrorPage.message | default "") "items" (.Values.customErrorPage.items | default list) -}}
+{{- $cfg | toJson -}}
+{{- end -}}
+
+{{- define "trivy-ui.dataPath" -}}
+{{- if .Values.cache.enabled }}{{ .Values.cache.mountPath | default "/cache" }}{{ else }}/tmp/trivy-ui-data{{ end -}}
+{{- end -}}

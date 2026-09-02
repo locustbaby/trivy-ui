@@ -1,15 +1,8 @@
 import { FileText, Shield, Server, Moon, Sun, Menu, X, ChevronLeft } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { cn, formatReportTypeName } from "@/lib/utils"
 import { Combobox } from "./combobox"
 import type { Cluster, ReportType } from "../../api/client"
-import { useState, useEffect } from "react"
-
-function formatTypeName(name: string): string {
-  let formatted = name.replace(/Report$/i, "")
-  formatted = formatted.replace(/([a-z])([A-Z])/g, "$1 $2")
-  formatted = formatted.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-  return formatted.trim()
-}
+import { useState, useEffect, useMemo } from "react"
 
 export interface SidebarProps {
   clusters: Cluster[]
@@ -22,6 +15,14 @@ export interface SidebarProps {
   onSelectType?: (type: string) => void
 }
 
+function getInitialTheme(): boolean {
+  if (typeof window === "undefined") return false
+  const savedTheme = localStorage.getItem("theme")
+  if (savedTheme === "dark") return true
+  if (savedTheme === "light") return false
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+}
+
 export function Sidebar({
   clusters,
   reportTypes,
@@ -32,12 +33,7 @@ export function Sidebar({
   onSelectCluster,
   onSelectType,
 }: SidebarProps) {
-  const [isDark, setIsDark] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return document.documentElement.classList.contains('dark')
-    }
-    return false
-  })
+  const [isDark, setIsDark] = useState(getInitialTheme)
 
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [isMobileOpen, setIsMobileOpen] = useState(false)
@@ -51,17 +47,6 @@ export function Sidebar({
     localStorage.setItem('theme', isDark ? 'dark' : 'light')
   }, [isDark])
 
-  useEffect(() => {
-    const savedTheme = localStorage.getItem('theme')
-    if (savedTheme === 'dark') {
-      setIsDark(true)
-    } else if (savedTheme === 'light') {
-      setIsDark(false)
-    } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      setIsDark(true)
-    }
-  }, [])
-
   // Close mobile sidebar when clicking outside
   useEffect(() => {
     const handleResize = () => {
@@ -73,17 +58,23 @@ export function Sidebar({
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  const clusterOptions = clusters.length > 1 
+  const clusterOptions = useMemo(() => clusters.length > 1
     ? [
         { value: "all", label: "🌐 All Clusters" },
         ...clusters.map((c) => ({ value: c.name, label: c.name }))
       ]
-    : clusters.map((c) => ({ value: c.name, label: c.name }))
+    : clusters.map((c) => ({ value: c.name, label: c.name })), [clusters])
 
-  const reportTypeOptions = reportTypes.map((t) => ({
+  const sortedReportTypes = useMemo(() => reportTypes.slice().sort((a, b) => {
+    if (a.namespaced && !b.namespaced) return -1
+    if (!a.namespaced && b.namespaced) return 1
+    return a.name.localeCompare(b.name)
+  }), [reportTypes])
+
+  const reportTypeOptions = useMemo(() => sortedReportTypes.map((t) => ({
     value: t.name,
-    label: formatTypeName(t.kind || t.name),
-  }))
+    label: formatReportTypeName(t.kind || t.name),
+  })), [sortedReportTypes])
 
   const currentClusterObj = clusters.find((c) => c.name === selectedCluster)
   const syncState = currentClusterObj?.syncState || "Cached"
@@ -202,17 +193,8 @@ export function Sidebar({
 
           {/* Report Type List */}
           <nav className="mt-3 space-y-1">
-            {reportTypes
-              .slice() // Create a copy to avoid mutating the original array
-              .sort((a, b) => {
-                // 1. Namespaced reports first, then cluster-scoped
-                if (a.namespaced && !b.namespaced) return -1
-                if (!a.namespaced && b.namespaced) return 1
-                // 2. Within each group, sort alphabetically by name
-                return a.name.localeCompare(b.name)
-              })
-              .map((type) => {
-                const displayName = formatTypeName(type.kind || type.name)
+            {sortedReportTypes.map((type) => {
+                const displayName = formatReportTypeName(type.kind || type.name)
                 const count = reportCounts[type.name]
                 const isSelected = selectedType === type.name
 

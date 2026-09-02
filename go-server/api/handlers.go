@@ -5,13 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"trivy-ui/auth"
 	"trivy-ui/config"
+	"trivy-ui/dataaccess"
 	"trivy-ui/kubernetes"
 	"trivy-ui/utils"
 )
@@ -25,6 +31,21 @@ type Response struct {
 	Code    int         `json:"code"`
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
+	Error   *APIError   `json:"error,omitempty"`
+}
+
+type APIError struct {
+	Type      string `json:"type"`
+	RequestID string `json:"requestId,omitempty"`
+}
+
+func markDeprecated(w http.ResponseWriter, r *http.Request, canonical string) {
+	if strings.HasPrefix(r.URL.Path, canonical) {
+		return
+	}
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Sunset", time.Now().UTC().Add(180*24*time.Hour).Format(http.TimeFormat))
+	w.Header().Set("Link", "<"+canonical+">; rel=\"successor-version\"")
 }
 
 type PaginatedResponse struct {
@@ -32,13 +53,17 @@ type PaginatedResponse struct {
 	WithVulnerabilities int         `json:"withVulnerabilities,omitempty"`
 	Page                int         `json:"page"`
 	PageSize            int         `json:"pageSize"`
+	HasNext             bool        `json:"hasNext"`
 	Data                interface{} `json:"data"`
 }
 
 type Cluster struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	SyncState   string `json:"syncState,omitempty"`
+	Name         string    `json:"name"`
+	Description  string    `json:"description,omitempty"`
+	SyncState    string    `json:"syncState,omitempty"`
+	ObservedAt   time.Time `json:"observedAt,omitempty"`
+	Stale        bool      `json:"stale,omitempty"`
+	DataComplete bool      `json:"dataComplete"`
 }
 
 type Namespace struct {
@@ -48,13 +73,57 @@ type Namespace struct {
 }
 
 type Report struct {
-	Type      string      `json:"type"`
-	Cluster   string      `json:"cluster"`
-	Namespace string      `json:"namespace"`
-	Name      string      `json:"name"`
-	Status    string      `json:"status,omitempty"`
-	Data      interface{} `json:"data"`
-	UpdatedAt time.Time   `json:"updated_at"`
+	Type            string      `json:"type"`
+	Cluster         string      `json:"cluster"`
+	Namespace       string      `json:"namespace"`
+	Name            string      `json:"name"`
+	ResourceVersion string      `json:"resourceVersion,omitempty"`
+	Status          string      `json:"status,omitempty"`
+	Stale           bool        `json:"stale,omitempty"`
+	Data            interface{} `json:"data"`
+	Ref             ReportRef   `json:"ref"`
+	SortKey         string      `json:"-"`
+	UpdatedAt       time.Time   `json:"updated_at"`
+}
+
+type ReportRef struct {
+	Cluster   string `json:"cluster"`
+	Namespace string `json:"namespace"`
+	Type      string `json:"type"`
+	Name      string `json:"name"`
+}
+
+type detailFlight struct {
+	done   chan struct{}
+	report *kubernetes.Report
+	err    error
+}
+
+var detailFlights sync.Map
+
+func getReportDetailSingleflight(ctx context.Context, key string, fetch func() (*kubernetes.Report, error)) (report *kubernetes.Report, err error) {
+	flight := &detailFlight{done: make(chan struct{})}
+	actual, loaded := detailFlights.LoadOrStore(key, flight)
+	if loaded {
+		select {
+		case <-actual.(*detailFlight).done:
+			return actual.(*detailFlight).report, actual.(*detailFlight).err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	// Panic-safe: the flight entry must always be removed and the done channel
+	// closed, otherwise waiters block forever on this key until restart.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("report detail fetch panicked: %v\n%s", recovered, debug.Stack())
+		}
+		flight.report, flight.err = report, err
+		close(flight.done)
+		detailFlights.Delete(key)
+	}()
+	report, err = fetch()
+	return report, err
 }
 
 type SeverityTotals struct {
@@ -86,6 +155,7 @@ type ClusterSummary struct {
 }
 
 type NamespaceSummary struct {
+	Cluster  string `json:"cluster"`
 	Name     string `json:"name"`
 	Critical int    `json:"critical"`
 	High     int    `json:"high"`
@@ -103,16 +173,19 @@ type ClusterOverview struct {
 type TrendRecord struct {
 	Timestamp time.Time `json:"timestamp"`
 	Cluster   string    `json:"cluster"`
+	Namespace string    `json:"namespace,omitempty"`
 	Critical  int       `json:"critical"`
 	High      int       `json:"high"`
 	Medium    int       `json:"medium"`
 }
 
 type Handler struct {
-	cache      CacheService
-	clusterReg *ClusterRegistry
-	querySvc   QueryService
-	crdReg     *config.CRDRegistry
+	cache       CacheService
+	clusterReg  *ClusterRegistry
+	querySvc    QueryService
+	crdReg      *config.CRDRegistry
+	auth        *auth.Service
+	sourceScope *dataaccess.Policy
 }
 
 type CacheService interface {
@@ -120,6 +193,8 @@ type CacheService interface {
 	Items() map[string]interface{}
 	ItemsByType(typeName string) map[string]interface{}
 	GetReports(typeName, clusterFilter string, namespaceFilters []string) []Report
+	GetRawReportsByType(typeName, clusterFilter string, namespaceFilters []string) []Report
+	GetReportsByRefs(refs []ReportRef) ([]Report, int)
 	GetReportCount(reportType, cluster string) (int, int)
 	GetOverviewData(cluster string) *ClusterOverview
 	GetTrends(clusterFilter string, days int) []TrendRecord
@@ -131,6 +206,14 @@ type CacheService interface {
 
 type CacheServiceImpl struct {
 	cache *Cache
+}
+
+type reportSummaryProvider interface {
+	ReportSummaries() []Report
+}
+
+type prefixItemProvider interface {
+	ItemsByPrefix(prefix string) map[string]interface{}
 }
 
 func NewCacheServiceImpl() *CacheServiceImpl {
@@ -152,12 +235,28 @@ func (c *CacheServiceImpl) Items() map[string]interface{} {
 	return c.getCache().Items()
 }
 
+func (c *CacheServiceImpl) ItemsByPrefix(prefix string) map[string]interface{} {
+	return c.getCache().ItemsByPrefix(prefix)
+}
+
+func (c *CacheServiceImpl) ReportSummaries() []Report {
+	return c.getCache().ReportSummaries()
+}
+
 func (c *CacheServiceImpl) Set(key string, value interface{}, expiration time.Duration) {
 	c.getCache().Set(key, value, expiration)
 }
 
 func (c *CacheServiceImpl) Delete(key string) {
 	c.getCache().Delete(key)
+}
+
+func (c *CacheServiceImpl) CapacityExceeded() bool {
+	return c.getCache().CapacityExceeded()
+}
+
+func (c *CacheServiceImpl) CapacityExceededFor(cluster string) bool {
+	return c.getCache().CapacityExceededFor(cluster)
 }
 
 func (c *CacheServiceImpl) DeleteReportEntry(cluster, namespace, reportType, name string) {
@@ -170,6 +269,14 @@ func (c *CacheServiceImpl) ItemsByType(typeName string) map[string]interface{} {
 
 func (c *CacheServiceImpl) GetReports(typeName, clusterFilter string, namespaceFilters []string) []Report {
 	return c.getCache().GetReports(typeName, clusterFilter, namespaceFilters)
+}
+
+func (c *CacheServiceImpl) GetRawReportsByType(typeName, clusterFilter string, namespaceFilters []string) []Report {
+	return c.getCache().GetRawReportsByType(typeName, clusterFilter, namespaceFilters)
+}
+
+func (c *CacheServiceImpl) GetReportsByRefs(refs []ReportRef) ([]Report, int) {
+	return c.getCache().GetReportsByRefs(refs)
 }
 
 func (c *CacheServiceImpl) GetReportCount(reportType, cluster string) (int, int) {
@@ -188,12 +295,34 @@ func (c *CacheServiceImpl) GetStats() map[string]interface{} {
 	return c.getCache().GetStats()
 }
 
-func NewHandler(k8sClient *kubernetes.Client, cache CacheService, clusterReg *ClusterRegistry, querySvc QueryService, crdReg *config.CRDRegistry) *Handler {
+func (h *Handler) reportSummaries() []Report {
+	if provider, ok := h.cache.(reportSummaryProvider); ok {
+		return provider.ReportSummaries()
+	}
+	items := h.cache.Items()
+	if provider, ok := h.cache.(prefixItemProvider); ok {
+		items = provider.ItemsByPrefix("report:")
+	}
+	reports := make([]Report, 0, len(items))
+	for key, value := range items {
+		if !strings.HasPrefix(key, "report:") {
+			continue
+		}
+		if report, ok := convertCacheValue[Report](value); ok {
+			reports = append(reports, report)
+		}
+	}
+	return reports
+}
+
+func NewHandler(k8sClient *kubernetes.Client, cache CacheService, clusterReg *ClusterRegistry, querySvc QueryService, crdReg *config.CRDRegistry, authService *auth.Service, sourceScope *dataaccess.Policy) *Handler {
 	return &Handler{
-		cache:      cache,
-		clusterReg: clusterReg,
-		querySvc:   querySvc,
-		crdReg:     crdReg,
+		cache:       cache,
+		clusterReg:  clusterReg,
+		querySvc:    querySvc,
+		crdReg:      crdReg,
+		auth:        authService,
+		sourceScope: sourceScope,
 	}
 }
 
@@ -201,13 +330,6 @@ func writeJSON(w http.ResponseWriter, code int, resp Response) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(resp)
-}
-
-func writeError(w http.ResponseWriter, code int, message string) {
-	writeJSON(w, code, Response{
-		Code:    CodeError,
-		Message: message,
-	})
 }
 
 // convertCacheValue 通用类型转换函数，减少重复代码
@@ -273,9 +395,103 @@ func (h *Handler) refreshCRDRegistry() {
 	}
 }
 
+func (h *Handler) reportRegistry(cluster string) *config.CRDRegistry {
+	if cluster != "" {
+		if client := h.clusterReg.Get(cluster); client != nil && client.Registry != nil {
+			return client.Registry
+		}
+	}
+	return h.crdReg
+}
+
+func (h *Handler) reportTypes(cluster string) []config.ReportKind {
+	if cluster != "" {
+		registry := h.reportRegistry(cluster)
+		if client := h.clusterReg.Get(cluster); client != nil && client.Client != nil && client.Client.Config() != nil {
+			if err := registry.RefreshIfNeeded(client.Client.Config()); err != nil {
+				utils.LogWarning("Failed to refresh Cluster report types", map[string]interface{}{"cluster": cluster, "error": err.Error()})
+			}
+		}
+		return registry.GetAllReports()
+	}
+
+	merged := make(map[string]config.ReportKind)
+	clients := h.clusterReg.All()
+	clusterNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clusterNames = append(clusterNames, name)
+	}
+	sort.Strings(clusterNames)
+	for _, name := range clusterNames {
+		client := clients[name]
+		if client.Registry == nil {
+			continue
+		}
+		for _, reportType := range client.Registry.GetAllReports() {
+			if _, exists := merged[reportType.Name]; !exists {
+				merged[reportType.Name] = reportType
+			}
+		}
+	}
+	if len(merged) == 0 {
+		h.refreshCRDRegistry()
+		return h.crdReg.GetAllReports()
+	}
+	result := make([]config.ReportKind, 0, len(merged))
+	for _, reportType := range merged {
+		result = append(result, reportType)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
+func (h *Handler) reportTypesForScope(cluster string, scope auth.AccessSnapshot) []config.ReportKind {
+	if cluster != "" {
+		if !scope.CanReadCluster(cluster) || h.clusterReg.Get(cluster) == nil {
+			return []config.ReportKind{}
+		}
+		return filterReportTypesForScope(cluster, h.reportTypes(cluster), scope)
+	}
+	merged := make(map[string]config.ReportKind)
+	clients := h.clusterReg.All()
+	clusterNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clusterNames = append(clusterNames, name)
+	}
+	sort.Strings(clusterNames)
+	for _, name := range clusterNames {
+		client := clients[name]
+		if !scope.CanReadCluster(name) || client.Registry == nil {
+			continue
+		}
+		for _, reportType := range client.Registry.GetAllReports() {
+			if !scope.CanReadReportType(name, reportType.Namespaced) {
+				continue
+			}
+			merged[reportType.Name] = reportType
+		}
+	}
+	result := make([]config.ReportKind, 0, len(merged))
+	for _, reportType := range merged {
+		result = append(result, reportType)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
+func filterReportTypesForScope(cluster string, reportTypes []config.ReportKind, scope auth.AccessSnapshot) []config.ReportKind {
+	filtered := make([]config.ReportKind, 0, len(reportTypes))
+	for _, reportType := range reportTypes {
+		if scope.CanReadReportType(cluster, reportType.Namespaced) {
+			filtered = append(filtered, reportType)
+		}
+	}
+	return filtered
+}
+
 func (h *Handler) GetReportTypes(w http.ResponseWriter, r *http.Request) {
-	h.refreshCRDRegistry()
-	reportTypes := h.crdReg.GetAllReports()
+	markDeprecated(w, r, "/api/v1/report-types")
+	reportTypes := h.reportTypesForScope(r.URL.Query().Get("cluster"), requestAuth(r).Access)
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
 		Message: "Success",
@@ -284,8 +500,8 @@ func (h *Handler) GetReportTypes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetTypesV1(w http.ResponseWriter, r *http.Request) {
-	h.refreshCRDRegistry()
-	reportTypes := h.crdReg.GetAllReports()
+	markDeprecated(w, r, "/api/v1/report-types")
+	reportTypes := h.reportTypesForScope(r.URL.Query().Get("cluster"), requestAuth(r).Access)
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
 		Message: "Success",
@@ -301,18 +517,23 @@ func (h *Handler) ReadinessCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	registry := h.crdReg
-
-	if !registry.IsDiscovered() {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte("CRDs not discovered yet"))
-		return
-	}
-
 	clients := h.clusterReg.All()
 	if len(clients) == 0 {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("No cluster clients available"))
+		return
+	}
+
+	discovered := false
+	for _, client := range clients {
+		if client.Registry != nil && client.Registry.IsDiscovered() {
+			discovered = true
+			break
+		}
+	}
+	if !discovered && !h.crdReg.IsDiscovered() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("CRDs not discovered yet"))
 		return
 	}
 
@@ -322,6 +543,10 @@ func (h *Handler) ReadinessCheck(w http.ResponseWriter, r *http.Request) {
 
 // GetCacheStats 获取缓存统计信息
 func (h *Handler) GetCacheStats(w http.ResponseWriter, r *http.Request) {
+	if h.auth != nil && h.auth.IsEnabled() {
+		writeError(w, r, http.StatusForbidden, ErrAccessDenied, "cache statistics are not available in local auth mode")
+		return
+	}
 	stats := h.cache.GetStats()
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
@@ -331,22 +556,30 @@ func (h *Handler) GetCacheStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
+	markDeprecated(w, r, "/api/v1/clusters")
 	refresh := r.URL.Query().Get("refresh") == "1"
 	emptyKey := "empty:clusters"
 
 	var clusters []Cluster
 	clusterClients := h.clusterReg.All()
+	scope := requestAuth(r).Access
 	for name, cc := range clusterClients {
+		if !scope.CanReadCluster(name) {
+			continue
+		}
 		cc.mu.RLock()
 		syncState := cc.SyncState
+		observedAt := cc.ObservedAt
 		cc.mu.RUnlock()
 		if syncState == "" {
 			syncState = "Cached"
 		}
 		clusterInfo := Cluster{
-			Name:        name,
-			Description: fmt.Sprintf("API Server: %s, version: %s", cc.APIServerURL, cc.Version),
-			SyncState:   syncState,
+			Name:         name,
+			Description:  "",
+			SyncState:    syncState,
+			ObservedAt:   observedAt,
+			DataComplete: syncState == "FullySynced" || syncState == "Cached",
 		}
 		h.cache.Set(clusterKey(clusterInfo.Name), clusterInfo, 0)
 		clusters = append(clusters, clusterInfo)
@@ -363,6 +596,9 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 
 	if !refresh {
 		items := h.cache.Items()
+		if provider, ok := h.cache.(prefixItemProvider); ok {
+			items = provider.ItemsByPrefix("cluster:")
+		}
 		for k, v := range items {
 			if !strings.HasPrefix(k, "cluster:") {
 				continue
@@ -373,6 +609,11 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 			}
 			if cluster.SyncState == "" {
 				cluster.SyncState = "Cached"
+			}
+			cluster.Description = ""
+			cluster.DataComplete = cluster.SyncState == "FullySynced" || cluster.SyncState == "Cached"
+			if !scope.CanReadCluster(cluster.Name) {
+				continue
 			}
 			clusters = append(clusters, cluster)
 		}
@@ -403,12 +644,21 @@ func (h *Handler) GetClusters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request, cluster string) {
+	markDeprecated(w, r, "/api/v1/clusters/"+cluster+"/namespaces")
+	scope := requestAuth(r).Access
+	if !scope.CanReadCluster(cluster) {
+		writeJSON(w, http.StatusOK, Response{Code: CodeSuccess, Message: "Success (empty)", Data: []Namespace{}})
+		return
+	}
 	refresh := r.URL.Query().Get("refresh") == "1"
 	emptyKey := fmt.Sprintf("empty:namespaces:%s", cluster)
 
 	if !refresh {
 		var namespaces []Namespace
 		items := h.cache.Items()
+		if provider, ok := h.cache.(prefixItemProvider); ok {
+			items = provider.ItemsByPrefix("namespace:")
+		}
 		for k, v := range items {
 			if strings.HasPrefix(k, "namespace:") {
 				var ns Namespace
@@ -422,6 +672,9 @@ func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request,
 					continue
 				}
 				if ns.Cluster == cluster {
+					if !scope.CanRead(ns.Cluster, ns.Name) {
+						continue
+					}
 					namespaces = append(namespaces, ns)
 				}
 			}
@@ -446,7 +699,7 @@ func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request,
 
 	clusterClient := h.clusterReg.Get(cluster)
 	if clusterClient == nil {
-		writeError(w, http.StatusBadRequest, "Cluster not found")
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "Cluster not found")
 		return
 	}
 
@@ -489,6 +742,9 @@ func (h *Handler) GetNamespacesByCluster(w http.ResponseWriter, r *http.Request,
 	}
 	var namespaces []Namespace
 	for _, ns := range nsList {
+		if !scope.CanRead(cluster, ns) {
+			continue
+		}
 		nsObj := Namespace{Cluster: cluster, Name: ns}
 		h.cache.Set(namespaceKey(cluster, ns), nsObj, 0)
 		namespaces = append(namespaces, nsObj)
@@ -590,6 +846,7 @@ func (h *Handler) hasVulnerabilities(report Report) bool {
 }
 
 func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typeName string) {
+	markDeprecated(w, r, "/api/v1/reports?type="+url.QueryEscape(typeName))
 	clusterFilter, namespaceFilters, page, pageSize := h.parseQueryParams(r)
 
 	q := ReportQuery{
@@ -598,9 +855,14 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 		Namespaces: namespaceFilters,
 		Page:       page,
 		PageSize:   pageSize,
+		Access:     requestAuth(r).Access,
 	}
 
-	result := h.querySvc.ListReports(q)
+	result := listReports(r.Context(), h.querySvc, q)
+	if result.Incomplete {
+		writeError(w, r, http.StatusServiceUnavailable, ErrDataIncomplete, "report data is incomplete because cache capacity was exceeded")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
@@ -610,59 +872,108 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 			WithVulnerabilities: result.WithVulnerabilities,
 			Page:                page,
 			PageSize:            pageSize,
+			HasNext:             page*pageSize < result.Total,
 			Data:                result.Items,
 		},
 	})
 }
 
 func (h *Handler) getReportDetails(w http.ResponseWriter, r *http.Request, cluster, namespace, typeName, reportName string, allowFallback bool) {
-	reportKind := h.crdReg.GetReportByName(typeName)
-	if reportKind == nil {
-		writeError(w, http.StatusBadRequest, "Invalid report type")
-		return
+	if namespace == auth.ClusterScopedNamespace {
+		namespace = ""
 	}
-
 	if cluster == "" {
 		if !allowFallback {
-			writeError(w, http.StatusBadRequest, "Missing cluster parameter")
+			writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "Missing cluster parameter")
 			return
 		}
 		items := h.cache.ItemsByType(typeName)
+		candidates := make([]string, 0, 2)
 		for k := range items {
-			c, ns, _, reportNameFromKey, ok := h.parseReportKey(k)
-			if !ok || reportNameFromKey != reportName {
+			c, ns, typ, reportNameFromKey, ok := h.parseReportKey(k)
+			if !ok || typ != typeName || reportNameFromKey != reportName {
 				continue
 			}
-			cluster = c
-			namespace = ns
-			break
+			if namespace != "" && ns != namespace {
+				continue
+			}
+			if !requestAuth(r).Access.CanRead(c, ns) {
+				continue
+			}
+			candidates = append(candidates, c+"\x00"+ns)
+		}
+		if len(candidates) > 1 {
+			writeError(w, r, http.StatusConflict, ErrReportAmbiguous, "report reference is ambiguous")
+			return
+		}
+		if len(candidates) == 1 {
+			parts := strings.SplitN(candidates[0], "\x00", 2)
+			cluster = parts[0]
+			namespace = parts[1]
 		}
 	}
 
 	if cluster == "" {
-		writeError(w, http.StatusNotFound, "Report not found")
+		writeError(w, r, http.StatusNotFound, ErrReportNotFound, "Report not found")
+		return
+	}
+
+	reportKind := h.reportRegistry(cluster).GetReportByName(typeName)
+	if reportKind == nil {
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "Invalid report type")
+		return
+	}
+	if !requestAuth(r).Access.CanRead(cluster, namespace) {
+		writeError(w, r, http.StatusForbidden, ErrAccessDenied, "report access denied")
 		return
 	}
 
 	if cachedDetail, found, ttlRemaining := GetReportDetailWithTTL(cluster, namespace, typeName, reportName); found {
-		if ttlRemaining < 2*time.Minute {
-			RefreshReportDetailAsync(cluster, namespace, typeName, reportName, *reportKind)
+		cacheCurrent := false
+		if cache := getCache(); cache != nil {
+			if value, summaryFound := cache.Get(reportKey(cluster, namespace, typeName, reportName)); summaryFound {
+				if summary, ok := decodeReportValue(value); ok {
+					cacheCurrent = summary.ResourceVersion == "" || cachedDetail.ResourceVersion == summary.ResourceVersion
+				}
+			}
 		}
-		writeJSON(w, http.StatusOK, Response{
-			Code:    CodeSuccess,
-			Message: "Success",
-			Data:    cachedDetail,
-		})
-		return
+		serveStale := !cachedDetail.Stale
+		if cachedDetail.Stale {
+			clusterClient := h.clusterReg.Get(cluster)
+			if clusterClient == nil {
+				serveStale = true
+			} else {
+				clusterClient.mu.RLock()
+				syncState := clusterClient.SyncState
+				clusterClient.mu.RUnlock()
+				serveStale = syncState == "" || syncState == "Initializing" || syncState == "Unavailable" || syncState == "Degraded" || syncState == "SyncFailed"
+			}
+		}
+		if cacheCurrent && serveStale {
+			if ttlRemaining < 2*time.Minute {
+				RefreshReportDetailAsync(cluster, namespace, typeName, reportName, *reportKind)
+			}
+			writeJSON(w, http.StatusOK, Response{
+				Code:    CodeSuccess,
+				Message: "Success",
+				Data:    cachedDetail,
+			})
+			return
+		}
+		if cache := getCache(); cache != nil {
+			cache.Delete(reportDetailKey(cluster, namespace, typeName, reportName))
+		}
 	}
 
 	clusterClient := h.clusterReg.Get(cluster)
 	if clusterClient == nil {
-		writeError(w, http.StatusInternalServerError, "Cluster client not found")
+		writeError(w, r, http.StatusServiceUnavailable, ErrProviderUnavailable, "Cluster client unavailable")
 		return
 	}
 
-	fullReport, err := clusterClient.Client.GetReportDetails(r.Context(), *reportKind, namespace, reportName)
+	fullReport, err := getReportDetailSingleflight(r.Context(), reportDetailKey(cluster, namespace, typeName, reportName), func() (*kubernetes.Report, error) {
+		return clusterClient.Client.GetReportDetails(r.Context(), *reportKind, namespace, reportName)
+	})
 	if err != nil {
 		if r.Context().Err() == context.Canceled {
 			return
@@ -674,19 +985,21 @@ func (h *Handler) getReportDetails(w http.ResponseWriter, r *http.Request, clust
 			"name":      reportName,
 			"error":     err.Error(),
 		})
-		writeError(w, http.StatusInternalServerError, "Failed to fetch report details")
+		writeError(w, r, http.StatusServiceUnavailable, ErrProviderUnavailable, "Failed to fetch report details")
 		return
 	}
 
 	report := Report{
-		Type:      typeName,
-		Cluster:   cluster,
-		Namespace: namespace,
-		Name:      reportName,
-		Status:    fullReport.Status,
-		Data:      fullReport.Data,
-		UpdatedAt: time.Now(),
+		Type:            typeName,
+		Cluster:         cluster,
+		Namespace:       namespace,
+		Name:            reportName,
+		ResourceVersion: fullReport.ResourceVersion,
+		Status:          fullReport.Status,
+		Data:            fullReport.Data,
+		UpdatedAt:       time.Now(),
 	}
+	report.Ref = ReportRef{Cluster: cluster, Namespace: namespace, Type: typeName, Name: reportName}
 
 	SetReportDetail(report)
 
@@ -698,13 +1011,14 @@ func (h *Handler) getReportDetails(w http.ResponseWriter, r *http.Request, clust
 }
 
 func (h *Handler) GetReportDetails(w http.ResponseWriter, r *http.Request) {
+	markDeprecated(w, r, "/api/v1/reports")
 	typeName := r.URL.Query().Get("type")
 	reportName := r.URL.Query().Get("name")
 	cluster := r.URL.Query().Get("cluster")
 	namespace := r.URL.Query().Get("namespace")
 
 	if typeName == "" || reportName == "" {
-		writeError(w, http.StatusBadRequest, "Missing type or name parameter")
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "Missing type or name parameter")
 		return
 	}
 
@@ -716,6 +1030,7 @@ func (h *Handler) GetReportDetailsByRef(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typeName, reportName string) {
+	markDeprecated(w, r, "/api/v1/reports")
 	cluster := r.URL.Query().Get("cluster")
 	namespace := r.URL.Query().Get("namespace")
 	h.getReportDetails(w, r, cluster, namespace, typeName, reportName, true)
@@ -723,7 +1038,7 @@ func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typ
 
 func (h *Handler) GetOverview(w http.ResponseWriter, r *http.Request) {
 	cluster := r.URL.Query().Get("cluster")
-	overview := h.cache.GetOverviewData(cluster)
+	overview := h.getOverviewForScopeCached(cluster, requestAuth(r).Access)
 	writeJSON(w, http.StatusOK, Response{
 		Code: CodeSuccess,
 		Data: overview,
@@ -737,7 +1052,11 @@ func (h *Handler) GetOverviewTrends(w http.ResponseWriter, r *http.Request) {
 	if d, err := strconv.Atoi(daysStr); err == nil && d > 0 {
 		days = d
 	}
-	trends := h.cache.GetTrends(cluster, days)
+	if days > 90 {
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "days must be between 1 and 90")
+		return
+	}
+	trends := h.getTrendsForScope(cluster, days, requestAuth(r).Access)
 	if trends == nil {
 		trends = []TrendRecord{}
 	}
@@ -747,10 +1066,250 @@ func (h *Handler) GetOverviewTrends(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// overviewMemo caches computed overviews keyed by cluster + access scope +
+// repository version. Overview is O(N) over all summaries and the dashboard
+// polls it every 15s per client; the memo collapses concurrent/repeated polls
+// into a single pass per cache generation. Short TTL keeps staleness bounded.
+//
+// Invariants:
+//   - Cached *ClusterOverview values are shared across concurrent requests and
+//     MUST be treated as immutable (handlers only serialize them).
+//   - The cache generation relies on every summary mutation going through
+//     Cache.Set/Delete (which bump typeVersions/repositoryVersion).
+type overviewMemoEntry struct {
+	overview  *ClusterOverview
+	expiresAt time.Time
+}
+
+var overviewMemo = struct {
+	mu      sync.Mutex
+	entries map[string]overviewMemoEntry
+}{entries: make(map[string]overviewMemoEntry)}
+
+const (
+	overviewMemoTTL      = 3 * time.Second
+	overviewMemoMaxItems = 64
+)
+
+var overviewMemoFlights sync.Map
+
+type overviewFlight struct {
+	done     chan struct{}
+	overview *ClusterOverview
+}
+
+func (h *Handler) emptyOverview() *ClusterOverview {
+	return &ClusterOverview{
+		SeverityTotals:         SeverityTotals{},
+		ScanTypesBreakdown:     make(map[string]TypeBreakdown),
+		TopVulnerableWorkloads: []WorkloadSummary{},
+		VulnerableClusters:     []ClusterSummary{},
+		VulnerableNamespaces:   []NamespaceSummary{},
+	}
+}
+
+func (h *Handler) getOverviewForScopeCached(clusterFilter string, scope auth.AccessSnapshot) *ClusterOverview {
+	// Unknown clusters cannot contain reports; skip both the O(N) scan and any
+	// memo insertion so unvalidated query params never grow the cache.
+	if clusterFilter != "" && h.clusterReg.Get(clusterFilter) == nil {
+		return h.emptyOverview()
+	}
+
+	key := fmt.Sprintf("%s\x00%s\x00%d", clusterFilter, scope.Fingerprint, getTypeVersion("", ""))
+	versionAtStart := getTypeVersion("", "")
+	now := time.Now()
+	overviewMemo.mu.Lock()
+	entry, ok := overviewMemo.entries[key]
+	if ok && now.After(entry.expiresAt) {
+		delete(overviewMemo.entries, key)
+		ok = false
+	}
+	overviewMemo.mu.Unlock()
+	if ok {
+		return entry.overview
+	}
+
+	// Singleflight: collapse concurrent misses for the same key into one scan.
+	flight := &overviewFlight{done: make(chan struct{})}
+	actual, loaded := overviewMemoFlights.LoadOrStore(key, flight)
+	if loaded {
+		leader := actual.(*overviewFlight)
+		select {
+		case <-leader.done:
+			return leader.overview
+		case <-time.After(overviewMemoTTL):
+			// Leader is taking abnormally long; fall back to computing locally.
+			return h.getOverviewForScope(clusterFilter, scope)
+		}
+	}
+	var result *ClusterOverview
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			utils.LogError("overview_compute_panic_recovered", map[string]interface{}{
+				"cluster": clusterFilter,
+				"error":   fmt.Sprint(recovered),
+				"stack":   string(debug.Stack()),
+			})
+			result = h.emptyOverview()
+		}
+		flight.overview = result
+		close(flight.done)
+		overviewMemoFlights.Delete(key)
+	}()
+
+	result = h.getOverviewForScope(clusterFilter, scope)
+
+	// TOCTOU guard: only memoize if the data version did not change while the
+	// O(N) scan was running.
+	if getTypeVersion("", "") == versionAtStart {
+		overviewMemo.mu.Lock()
+		if len(overviewMemo.entries) >= overviewMemoMaxItems {
+			for k, e := range overviewMemo.entries {
+				if time.Now().After(e.expiresAt) {
+					delete(overviewMemo.entries, k)
+				}
+			}
+		}
+		if len(overviewMemo.entries) >= overviewMemoMaxItems {
+			// Best-effort memo: dropping everything is safe and simpler than an LRU.
+			overviewMemo.entries = make(map[string]overviewMemoEntry)
+		}
+		overviewMemo.entries[key] = overviewMemoEntry{overview: result, expiresAt: time.Now().Add(overviewMemoTTL)}
+		overviewMemo.mu.Unlock()
+	}
+	return result
+}
+
+func (h *Handler) getOverviewForScope(clusterFilter string, scope auth.AccessSnapshot) *ClusterOverview {
+	overview := &ClusterOverview{
+		SeverityTotals:         SeverityTotals{},
+		ScanTypesBreakdown:     make(map[string]TypeBreakdown),
+		TopVulnerableWorkloads: []WorkloadSummary{},
+		VulnerableClusters:     []ClusterSummary{},
+		VulnerableNamespaces:   []NamespaceSummary{},
+	}
+	workloadScores := make(map[string]*WorkloadSummary)
+	nsScores := make(map[string]*NamespaceSummary)
+	clusterScores := make(map[string]*ClusterSummary)
+	for _, report := range h.reportSummaries() {
+		if clusterFilter != "" && report.Cluster != clusterFilter || !scope.CanRead(report.Cluster, report.Namespace) {
+			continue
+		}
+		overview.TotalReports++
+		critical, high, medium, low := extractSummaryCounts(report)
+		overview.SeverityTotals.Critical += critical
+		overview.SeverityTotals.High += high
+		overview.SeverityTotals.Medium += medium
+		overview.SeverityTotals.Low += low
+		breakdown := overview.ScanTypesBreakdown[report.Type]
+		breakdown.Scanned++
+		if critical > 0 || high > 0 || medium > 0 || low > 0 {
+			breakdown.Failed++
+		}
+		breakdown.Critical += critical
+		overview.ScanTypesBreakdown[report.Type] = breakdown
+		if critical == 0 && high == 0 {
+			continue
+		}
+		workloadKey := fmt.Sprintf("%s:%s:%s:%s", report.Cluster, report.Namespace, report.Type, report.Name)
+		if workloadScores[workloadKey] == nil {
+			workloadScores[workloadKey] = &WorkloadSummary{Cluster: report.Cluster, Namespace: report.Namespace, Name: report.Name, Type: report.Type}
+		}
+		workloadScores[workloadKey].Critical += critical
+		workloadScores[workloadKey].High += high
+		namespaceKey := fmt.Sprintf("%s:%s", report.Cluster, report.Namespace)
+		if nsScores[namespaceKey] == nil {
+			nsScores[namespaceKey] = &NamespaceSummary{Cluster: report.Cluster, Name: report.Namespace}
+		}
+		nsScores[namespaceKey].Critical += critical
+		nsScores[namespaceKey].High += high
+		if clusterScores[report.Cluster] == nil {
+			clusterScores[report.Cluster] = &ClusterSummary{Name: report.Cluster}
+		}
+		clusterScores[report.Cluster].Critical += critical
+		clusterScores[report.Cluster].High += high
+	}
+	for _, workload := range workloadScores {
+		overview.TopVulnerableWorkloads = append(overview.TopVulnerableWorkloads, *workload)
+	}
+	sort.Slice(overview.TopVulnerableWorkloads, func(i, j int) bool {
+		if overview.TopVulnerableWorkloads[i].Critical != overview.TopVulnerableWorkloads[j].Critical {
+			return overview.TopVulnerableWorkloads[i].Critical > overview.TopVulnerableWorkloads[j].Critical
+		}
+		return overview.TopVulnerableWorkloads[i].High > overview.TopVulnerableWorkloads[j].High
+	})
+	if len(overview.TopVulnerableWorkloads) > 5 {
+		overview.TopVulnerableWorkloads = overview.TopVulnerableWorkloads[:5]
+	}
+	if clusterFilter == "" {
+		for _, cluster := range clusterScores {
+			overview.VulnerableClusters = append(overview.VulnerableClusters, *cluster)
+		}
+	} else {
+		for _, namespace := range nsScores {
+			overview.VulnerableNamespaces = append(overview.VulnerableNamespaces, *namespace)
+		}
+	}
+	sort.Slice(overview.VulnerableClusters, func(i, j int) bool {
+		return overview.VulnerableClusters[i].Critical > overview.VulnerableClusters[j].Critical
+	})
+	sort.Slice(overview.VulnerableNamespaces, func(i, j int) bool {
+		return overview.VulnerableNamespaces[i].Critical > overview.VulnerableNamespaces[j].Critical
+	})
+	return overview
+}
+
+func (h *Handler) getTrendsForScope(cluster string, days int, scope auth.AccessSnapshot) []TrendRecord {
+	records := h.cache.GetTrends(cluster, days)
+	if scope.IsUnrestricted() {
+		filtered := make([]TrendRecord, 0, len(records))
+		for _, record := range records {
+			if record.Namespace == "" {
+				filtered = append(filtered, record)
+			}
+		}
+		return filtered
+	}
+
+	type trendKey struct {
+		bucket  time.Time
+		cluster string
+	}
+	aggregates := make(map[trendKey]TrendRecord)
+	add := func(key trendKey, record TrendRecord) {
+		aggregate := aggregates[key]
+		aggregate.Timestamp = key.bucket
+		aggregate.Cluster = key.cluster
+		aggregate.Critical += record.Critical
+		aggregate.High += record.High
+		aggregate.Medium += record.Medium
+		aggregates[key] = aggregate
+	}
+	for _, record := range records {
+		if record.Namespace == "" || !scope.CanRead(record.Cluster, record.Namespace) {
+			continue
+		}
+		bucket := record.Timestamp.UTC().Truncate(time.Hour)
+		add(trendKey{bucket: bucket, cluster: record.Cluster}, record)
+		if cluster == "" {
+			add(trendKey{bucket: bucket}, record)
+		}
+	}
+
+	filtered := make([]TrendRecord, 0, len(aggregates))
+	for _, record := range aggregates {
+		filtered = append(filtered, record)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Timestamp.Before(filtered[j].Timestamp)
+	})
+	return filtered
+}
+
 func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 	typeName := r.URL.Query().Get("type")
 	if typeName == "" {
-		writeError(w, http.StatusBadRequest, "Missing type parameter")
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "Missing type parameter")
 		return
 	}
 
@@ -766,9 +1325,14 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 		OnlyVulnerable: onlyVulnerable,
 		Page:           page,
 		PageSize:       pageSize,
+		Access:         requestAuth(r).Access,
 	}
 
-	result := h.querySvc.ListReports(q)
+	result := listReports(r.Context(), h.querySvc, q)
+	if result.Incomplete {
+		writeError(w, r, http.StatusServiceUnavailable, ErrDataIncomplete, "report data is incomplete because cache capacity was exceeded")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
@@ -778,6 +1342,7 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 			WithVulnerabilities: result.WithVulnerabilities,
 			Page:                page,
 			PageSize:            pageSize,
+			HasNext:             page*pageSize < result.Total,
 			Data:                result.Items,
 		},
 	})

@@ -2,11 +2,11 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"trivy-ui/config"
 	"trivy-ui/kubernetes"
 )
 
@@ -22,7 +22,27 @@ type ClusterClient struct {
 	Version      string
 	Namespaces   []string
 	SyncState    string
+	ObservedAt   time.Time
+	Registry     *config.CRDRegistry
 	mu           sync.RWMutex
+}
+
+func (r *ClusterRegistry) SetRegistry(clusterName string, registry *config.CRDRegistry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if client, ok := r.clients[clusterName]; ok {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		client.Registry = registry
+	}
+}
+
+func (r *ClusterRegistry) Register(clusterName string, client *kubernetes.Client, registry *config.CRDRegistry) error {
+	if err := r.Set(clusterName, client); err != nil {
+		return err
+	}
+	r.SetRegistry(clusterName, registry)
+	return nil
 }
 
 type ClusterRegistry struct {
@@ -89,11 +109,11 @@ func (r *ClusterRegistry) Set(clusterName string, client *kubernetes.Client) err
 	if versionInfo, err := client.Clientset().Discovery().ServerVersion(); err == nil {
 		version = versionInfo.GitVersion
 	}
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	namespaces, err := client.GetNamespaces(ctx)
 	cancel()
-	
+
 	if err != nil || len(namespaces) == 0 {
 		namespaces = r.recoverNamespaces(clusterName)
 	}
@@ -105,12 +125,13 @@ func (r *ClusterRegistry) Set(clusterName string, client *kubernetes.Client) err
 		APIServerURL: apiServerURL,
 		Version:      version,
 		Namespaces:   namespaces,
+		ObservedAt:   time.Now().UTC(),
 	}
 	r.mu.Unlock()
 
 	clusterInfo := Cluster{
 		Name:        clusterName,
-		Description: fmt.Sprintf("API Server: %s, version: %s", apiServerURL, version),
+		Description: "",
 	}
 	if r.cacheSvc != nil {
 		r.cacheSvc.Set(clusterKey(clusterName), clusterInfo, 0)
@@ -127,16 +148,19 @@ func (r *ClusterRegistry) recoverNamespaces(clusterName string) []string {
 	if r.cacheSvc == nil {
 		return nil
 	}
-	
+
 	var namespaces []string
 	namespaceSet := make(map[string]bool)
-	
+
 	items := r.cacheSvc.Items()
+	if provider, ok := r.cacheSvc.(prefixItemProvider); ok {
+		items = provider.ItemsByPrefix("namespace:")
+	}
 	for k, v := range items {
 		if !strings.HasPrefix(k, "namespace:") {
 			continue
 		}
-		
+
 		var ns Namespace
 		switch val := v.(type) {
 		case Namespace:
@@ -170,7 +194,7 @@ func (r *ClusterRegistry) recoverNamespaces(clusterName string) []string {
 		default:
 			continue
 		}
-		
+
 		if ns.Cluster == clusterName && ns.Name != "" {
 			if !namespaceSet[ns.Name] {
 				namespaces = append(namespaces, ns.Name)
@@ -178,7 +202,7 @@ func (r *ClusterRegistry) recoverNamespaces(clusterName string) []string {
 			}
 		}
 	}
-	
+
 	return namespaces
 }
 

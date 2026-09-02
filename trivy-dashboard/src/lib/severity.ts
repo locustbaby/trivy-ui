@@ -60,9 +60,13 @@ export function getSeverityDotColor(severity: string): string {
   }
 }
 
-export function parseSafeUrl(url: string): { hostname: string } | null {
+export function parseSafeUrl(url: string): URL | null {
   try {
-    return new URL(url)
+    const parsed = new URL(url)
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null
+    }
+    return parsed
   } catch {
     return null
   }
