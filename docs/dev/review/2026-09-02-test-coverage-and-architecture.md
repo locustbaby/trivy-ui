@@ -13,7 +13,7 @@
 - kwok 创建完成不代表 Kubernetes API 的 post-start hook 已 ready。E2E 创建两个 cluster，分别使用 KWOK v0.7.0 提供的 Kubernetes `v1.30.10` 和 `v1.31.6`，逐个轮询 `/readyz` 后才应用 CRD，避免 API server 初始化竞态。
 - Helm 渲染检查覆盖默认 RBAC、关闭 chart RBAC、关闭受限缓存卷以及自定义缓存挂载路径。`DATA_PATH` 由 Chart 统一推导，避免环境变量与 volume mount 不一致。
 - amd64 镜像在漏洞扫描后以只读根文件系统运行 `hash-password` smoke test，验证最终镜像中的服务二进制可执行。
-- OCI Chart 仅发布到 Docker Hub，并且只在 GitHub Release 发布后（或手动 dispatch）运行，不会在普通 `main` push 时绕过测试流水线。
+- OCI Chart 仅发布到 Docker Hub，并且只由 `chart-vX.Y.Z` tag 触发；服务镜像则由 `vX.Y.Z` tag 触发，两条发布链路彼此独立。
 
 ## 本轮修复与回归保护
 
