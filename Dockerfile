@@ -1,17 +1,24 @@
 ARG GOLANG_VERSION=1.25-bookworm
 ARG VERSION
 
-FROM golang:${GOLANG_VERSION} AS build
+# The build stage always runs on the builder platform (amd64) regardless of the
+# target platform. Go cross-compiles (CGO_ENABLED=0) so no emulation is needed.
+FROM --platform=$BUILDPLATFORM golang:${GOLANG_VERSION} AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /app
 RUN apt update && apt install -y curl git \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+COPY go-server/go.mod go-server/go.sum /app/go-server/
+WORKDIR /app/go-server
+RUN go mod download
+
 COPY . /app/
 
 WORKDIR /app/go-server
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o go-server
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o go-server
 RUN mkdir -p /tmp/trivy-ui-data
 
 WORKDIR /app/trivy-dashboard

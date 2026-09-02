@@ -16,6 +16,9 @@ concurrency:
 
 permissions:
   contents: read
+  # Actions cache backend (type=gha) requires write to persist build cache
+  # across runs; without it every run rebuilds from scratch.
+  actions: write
 
 jobs:
   tests:
@@ -215,47 +218,37 @@ jobs:
           kwokctl delete cluster --name "$KWOK_CLUSTER_A" || true
           kwokctl delete cluster --name "$KWOK_CLUSTER_B" || true
 
-  build-and-scan:
+  build-scan:
+    name: Build & Scan (${{ matrix.platform }})
     runs-on: ubuntu-latest
-    needs: [tests, e2e-kwok]
-    timeout-minutes: 60
+    needs: tests
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [amd64, arm64]
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
 
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: 'arm64'
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Extract branch or tag name and set version
+      - name: Extract version
         id: extract_tag
         env:
           EVENT_NAME: ${{ github.event_name }}
           HEAD_REF: ${{ github.head_ref }}
           REF_NAME: ${{ github.ref }}
         run: |
-          # First, determine the Docker tag
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            BRANCH_NAME="$HEAD_REF"
-            BRANCH_NAME=$(echo "${BRANCH_NAME}" | sed 's|/|-|g')
+            BRANCH_NAME=$(echo "$HEAD_REF" | sed 's|/|-|g')
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
           elif [[ "$REF_NAME" == refs/heads/* ]]; then
-            BRANCH_NAME=$(echo "$REF_NAME" | sed 's|refs/heads/||')
-            BRANCH_NAME=$(echo "${BRANCH_NAME}" | sed 's|/|-|g')
+            BRANCH_NAME=$(echo "$REF_NAME" | sed 's|refs/heads/||' | sed 's|/|-|g')
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
@@ -265,106 +258,133 @@ jobs:
             TAG_NAME="latest"
           fi
           echo "TAG=$TAG_NAME" >> $GITHUB_ENV
-          echo "Docker Tag: $TAG_NAME"
 
-          # Now, determine the version for the build
           if [[ "$REF_NAME" == refs/tags/* ]]; then
-            # If this is a tag push, use the tag as the version (without the 'v' prefix for semantic version)
             VERSION=$(echo "$REF_NAME" | sed 's|refs/tags/v||')
           else
-            # For non-tag builds, use a development version based on date and commit
             TIMESTAMP=$(date -u +"%Y%m%d")
             SHORT_SHA=$(git rev-parse --short HEAD)
             VERSION="0.0.0-dev.${TIMESTAMP}.${SHORT_SHA}"
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Build Version: $VERSION"
+          echo "Docker Tag: $TAG_NAME  Build Version: $VERSION"
 
-      - name: Build amd64 Docker Image for Scanning
+      - name: Build ${{ matrix.platform }} Docker Image for Scanning
         uses: docker/build-push-action@v7
         with:
           context: .
           push: false
           load: true
-          platforms: linux/amd64
-          tags: trivy-ui:${{ env.TAG }}-scan
+          platforms: linux/${{ matrix.platform }}
+          tags: trivy-ui:${{ env.TAG }}-${{ matrix.platform }}-scan
           build-args: |
             VERSION=${{ env.VERSION }}
-          cache-from: type=gha,scope=trivy-ui-amd64
-          cache-to: type=gha,scope=trivy-ui-amd64,mode=max
+          cache-from: type=gha,scope=trivy-ui-${{ matrix.platform }}
+          cache-to: type=gha,scope=trivy-ui-${{ matrix.platform }},mode=max
 
-      - name: Run Trivy Scan (Before Pushing)
+      - name: Run Trivy Scan (${{ matrix.platform }})
         id: trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: 'trivy-ui:${{ env.TAG }}-scan'
+          image-ref: 'trivy-ui:${{ env.TAG }}-${{ matrix.platform }}-scan'
           format: 'json'
-          output: trivy-result.json
+          output: trivy-${{ matrix.platform }}-result.json
           ignore-unfixed: true
           exit-code: 0
           severity: 'CRITICAL,HIGH'
 
-      - name: Check Trivy Scan Result
+      - name: Check Trivy Scan Result (${{ matrix.platform }})
         id: check_trivy
         run: |
-          echo "=== Trivy Scan Summary ==="
-          jq -r '.Results[]? | select(.Vulnerabilities != null) | .Target as $target | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | "\(.Severity)\t\(.VulnerabilityID)\t\($target)\t\(.PkgName)\t\(.InstalledVersion)"' trivy-result.json 2>/dev/null | head -50 || true
+          echo "=== Trivy Scan Summary (${{ matrix.platform }}) ==="
+          jq -r '.Results[]? | select(.Vulnerabilities != null) | .Target as $target | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | "\(.Severity)\t\(.VulnerabilityID)\t\($target)\t\(.PkgName)\t\(.InstalledVersion)"' trivy-${{ matrix.platform }}-result.json 2>/dev/null | head -50 || true
           echo "========================="
-          VULN_COUNT=$(jq '[.Results[]? | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | length' trivy-result.json 2>/dev/null || echo "0")
+          VULN_COUNT=$(jq '[.Results[]? | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | length' trivy-${{ matrix.platform }}-result.json 2>/dev/null || echo "0")
           echo "Vulnerability count (CRITICAL+HIGH): $VULN_COUNT"
           if [ "$VULN_COUNT" -gt 0 ] 2>/dev/null; then
             echo "found_vuln=true" >> $GITHUB_OUTPUT
-            echo "::error::Found $VULN_COUNT CRITICAL/HIGH vulnerabilities. Failing build."
+            echo "::error::Found $VULN_COUNT CRITICAL/HIGH vulnerabilities (${{ matrix.platform }}). Failing build."
             exit 1
           else
             echo "found_vuln=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Smoke test the production image
+      - name: Smoke test the production image (${{ matrix.platform }})
+        # Without QEMU the arm64 binary cannot be executed on the amd64 runner;
+        # the arm64 image is still fully validated by the Trivy scan above.
+        if: matrix.platform == 'amd64'
         run: |
           docker run --rm --read-only --tmpfs /tmp \
-            --entrypoint /app/go-server trivy-ui:${{ env.TAG }}-scan \
+            --entrypoint /app/go-server trivy-ui:${{ env.TAG }}-${{ matrix.platform }}-scan \
             hash-password smoke-test >/tmp/trivy-ui-password-hash
           test -s /tmp/trivy-ui-password-hash
 
-      - name: Build arm64 Docker Image for Scanning
-        uses: docker/build-push-action@v7
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          push: false
-          load: true
-          platforms: linux/arm64
-          tags: trivy-ui:${{ env.TAG }}-arm64-scan
-          build-args: |
-            VERSION=${{ env.VERSION }}
-          cache-from: type=gha,scope=trivy-ui-arm64
-          cache-to: type=gha,scope=trivy-ui-arm64,mode=max
+          name: trivy-scan-${{ matrix.platform }}
+          path: trivy-${{ matrix.platform }}-result.json
+          retention-days: 7
 
-      - name: Run Trivy Scan for arm64 Image
-        uses: aquasecurity/trivy-action@v0.36.0
+  push-image:
+    name: Build Multi-Arch & Push
+    runs-on: ubuntu-latest
+    needs: [tests, e2e-kwok, build-scan]
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
         with:
-          image-ref: 'trivy-ui:${{ env.TAG }}-arm64-scan'
-          format: 'json'
-          output: trivy-arm64-result.json
-          ignore-unfixed: true
-          exit-code: 1
-          severity: 'CRITICAL,HIGH'
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Extract version
+        id: extract_tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+        run: |
+          if [[ "$REF_NAME" == refs/tags/* ]]; then
+            TAG_NAME=$(echo "$REF_NAME" | sed 's|refs/tags/||')
+          elif [[ "$REF_NAME" == refs/heads/* ]]; then
+            BRANCH_NAME=$(echo "$REF_NAME" | sed 's|refs/heads/||' | sed 's|/|-|g')
+            TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
+          else
+            TAG_NAME="latest"
+          fi
+          echo "TAG=$TAG_NAME" >> $GITHUB_ENV
+
+          if [[ "$REF_NAME" == refs/tags/* ]]; then
+            VERSION=$(echo "$REF_NAME" | sed 's|refs/tags/v||')
+          else
+            TIMESTAMP=$(date -u +"%Y%m%d")
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="0.0.0-dev.${TIMESTAMP}.${SHORT_SHA}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Set Docker tags
         id: docker_meta
-        if: github.event_name != 'pull_request'
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            # For tag pushes, set both the specific version tag and latest
             echo "DOCKER_TAGS=${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }},${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:latest" >> $GITHUB_ENV
           else
-            # For other pushes, just use the specific tag
             echo "DOCKER_TAGS=${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}" >> $GITHUB_ENV
           fi
 
       - name: Build and Push Multi-Architecture Docker Image
         id: docker_build
-        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -380,16 +400,13 @@ jobs:
           cache-to: type=gha,scope=trivy-ui-multiarch,mode=max
 
       - name: Image digest
-        if: github.event_name != 'pull_request'
         run: echo ${{ steps.docker_build.outputs.digest }}
 
       - name: Inspect image
-        if: github.event_name != 'pull_request'
         run: |
           docker buildx imagetools inspect ${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}
 
       - name: Summary
-        if: github.event_name != 'pull_request'
         run: |
           echo "### Multi-Architecture Docker Image Build Complete 🚀" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
