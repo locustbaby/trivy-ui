@@ -36,3 +36,15 @@ go-server/bin/trivy-server
 go-server/trend-history.json
 go-server/api/trend-history.json
 go-server/api/.trivy-ui-*.tmp
+
+# Runtime generated data (cache)
+go-server/detail-cache.json
+
+# Local agent/tooling artifacts (never commit)
+.ghcache/
+.gomodcache/
+.gocache/
+go-server/.gocache/
+.askpass.sh
+.remaining.txt
+kind-kubeconfig-*.yaml

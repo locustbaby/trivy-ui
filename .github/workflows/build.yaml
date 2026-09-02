@@ -282,6 +282,7 @@ jobs:
 
       - name: Set Docker tags
         id: docker_meta
+        if: github.event_name != 'pull_request'
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             # For tag pushes, set both the specific version tag and latest
@@ -306,6 +307,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Image digest
+        if: github.event_name != 'pull_request'
         run: echo ${{ steps.docker_build.outputs.digest }}
 
       - name: Inspect image
@@ -314,6 +316,7 @@ jobs:
           docker buildx imagetools inspect ${{ secrets.DOCKERHUB_USERNAME }}/trivy-ui:${{ env.TAG }}
 
       - name: Summary
+        if: github.event_name != 'pull_request'
         run: |
           echo "### Multi-Architecture Docker Image Build Complete 🚀" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

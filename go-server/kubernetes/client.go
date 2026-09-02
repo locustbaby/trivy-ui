@@ -42,7 +42,10 @@ type ClientConfig struct {
 	NamespaceRestricted bool
 	// UseInCluster forces the client to use the pod's service account. When false,
 	// an explicit kubeconfig is always honored, including when running in a pod.
-	UseInCluster    bool
+	UseInCluster bool
+	// Context selects a specific context within the kubeconfig file. When empty,
+	// the file's current-context is used.
+	Context         string
 	MaxWatchStreams int
 }
 
@@ -76,18 +79,31 @@ func NewClientWithConfig(kubeconfig string, clientConfig ClientConfig) (*Client,
 			home := homedir.HomeDir()
 			kubeconfig = filepath.Join(home, ".kube", "config")
 		}
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if err == nil {
+		if clientConfig.Context != "" {
+			rawConfig, loadErr := clientcmd.LoadFromFile(kubeconfig)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			config, err = clientcmd.NewDefaultClientConfig(*rawConfig, &clientcmd.ConfigOverrides{CurrentContext: clientConfig.Context}).ClientConfig()
+			if err != nil {
+				return nil, err
+			}
+			contextName = clientConfig.Context
+			clusterName = contextName
+		} else {
+			config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+			if err == nil {
 
-			if rawConfig, err2 := clientcmd.LoadFromFile(kubeconfig); err2 == nil {
-				contextName = rawConfig.CurrentContext
-				if contextName != "" {
-					clusterName = contextName
+				if rawConfig, err2 := clientcmd.LoadFromFile(kubeconfig); err2 == nil {
+					contextName = rawConfig.CurrentContext
+					if contextName != "" {
+						clusterName = contextName
+					}
 				}
 			}
-		}
-		if clusterName == "" {
-			clusterName = "default"
+			if clusterName == "" {
+				clusterName = "default"
+			}
 		}
 	}
 

@@ -38,6 +38,8 @@ type clusterInfo struct {
 	Name       string
 	Kubeconfig string
 	InCluster  bool
+	// Context selects the kubeconfig context to use. Empty means current-context.
+	Context string
 }
 
 func sourceFingerprint(source clusterInfo, client *kubernetes.Client) string {
@@ -77,6 +79,19 @@ func validClusterAlias(alias string) bool {
 		return false
 	}
 	return true
+}
+
+// legacyDisplayName maps a kubeconfig context name to the cluster alias used by
+// legacy auto-discovery (i.e. when CLUSTER_SOURCES is not configured). ARN-style
+// EKS context names are shortened to their cluster name segment.
+func legacyDisplayName(contextName string) string {
+	if strings.HasPrefix(contextName, "arn:aws:eks:") && strings.Contains(contextName, ":cluster/") {
+		parts := strings.Split(contextName, ":cluster/")
+		if len(parts) == 2 {
+			return parts[1]
+		}
+	}
+	return contextName
 }
 
 func loadConfiguredClusters(dir string, policy *dataaccess.Policy) ([]clusterInfo, error) {
@@ -229,32 +244,24 @@ func main() {
 						utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
 						continue
 					}
-					clusterName := ""
-					if rawConfig.CurrentContext != "" {
-						if currentContext, ok := rawConfig.Contexts[rawConfig.CurrentContext]; ok {
-							clusterName = currentContext.Cluster
+					// Legacy auto-discovery: initialize every reachable context in the file.
+					contextNames := make([]string, 0, len(rawConfig.Contexts))
+					for name := range rawConfig.Contexts {
+						contextNames = append(contextNames, name)
+					}
+					sort.Strings(contextNames) // deterministic startup order per file
+					for _, contextName := range contextNames {
+						displayName := legacyDisplayName(contextName)
+						if !dataPolicy.ShouldInitialize(displayName) {
+							utils.LogInfo("Skipping cluster outside data access policy", map[string]interface{}{"file": file.Name(), "cluster": displayName})
+							continue
 						}
+						if !validClusterAlias(displayName) {
+							utils.LogWarning("Skipping kubeconfig context with invalid legacy cluster alias", map[string]interface{}{"file": file.Name(), "cluster": displayName})
+							continue
+						}
+						clustersToInit = append(clustersToInit, clusterInfo{Name: displayName, Kubeconfig: path, Context: contextName})
 					}
-					if clusterName == "" {
-						utils.LogInfo("No cluster found in kubeconfig file", map[string]interface{}{"file": file.Name()})
-						continue
-					}
-					if strings.Contains(clusterName, "/") {
-						parts := strings.Split(clusterName, "/")
-						clusterName = parts[len(parts)-1]
-					} else if strings.Contains(clusterName, ":") {
-						parts := strings.Split(clusterName, ":")
-						clusterName = parts[len(parts)-1]
-					}
-					if !dataPolicy.ShouldInitialize(clusterName) {
-						utils.LogInfo("Skipping kubeconfig file because cluster is outside data access policy", map[string]interface{}{"file": file.Name(), "cluster": clusterName})
-						continue
-					}
-					if !validClusterAlias(clusterName) {
-						utils.LogWarning("Skipping kubeconfig with invalid legacy cluster alias", map[string]interface{}{"file": file.Name(), "cluster": clusterName})
-						continue
-					}
-					clustersToInit = append(clustersToInit, clusterInfo{Name: clusterName, Kubeconfig: path})
 				}
 			}
 		}
@@ -270,22 +277,23 @@ func main() {
 		}
 		if _, err := os.Stat(kubeconfig); err == nil {
 			if rawConfig, err := clientcmd.LoadFromFile(kubeconfig); err == nil {
-				contextName := rawConfig.CurrentContext
-				if currentContext, ok := rawConfig.Contexts[contextName]; ok && currentContext.Cluster != "" {
-					contextName = currentContext.Cluster
+				// Legacy auto-discovery: initialize every reachable context in the file.
+				contextNames := make([]string, 0, len(rawConfig.Contexts))
+				for name := range rawConfig.Contexts {
+					contextNames = append(contextNames, name)
 				}
-				if contextName != "" {
-					if strings.HasPrefix(contextName, "arn:aws:eks:") && strings.Contains(contextName, ":cluster/") {
-						parts := strings.Split(contextName, ":cluster/")
-						if len(parts) == 2 {
-							contextName = parts[1]
-						}
+				sort.Strings(contextNames) // deterministic first-cluster + stable startup order
+				for _, contextName := range contextNames {
+					displayName := legacyDisplayName(contextName)
+					if !dataPolicy.ShouldInitialize(displayName) {
+						utils.LogInfo("Skipping cluster outside data access policy", map[string]interface{}{"cluster": displayName})
+						continue
 					}
-					if dataPolicy.ShouldInitialize(contextName) {
-						if validClusterAlias(contextName) {
-							clustersToInit = append(clustersToInit, clusterInfo{Name: contextName, Kubeconfig: kubeconfig})
-						}
+					if !validClusterAlias(displayName) {
+						utils.LogWarning("Skipping kubeconfig context with invalid legacy cluster alias", map[string]interface{}{"cluster": displayName})
+						continue
 					}
+					clustersToInit = append(clustersToInit, clusterInfo{Name: displayName, Kubeconfig: kubeconfig, Context: contextName})
 				}
 			}
 		}
@@ -294,8 +302,15 @@ func main() {
 	uniqueClusters := clustersToInit[:0]
 	for _, cluster := range clustersToInit {
 		if _, exists := seenClusters[cluster.Name]; exists {
-			utils.LogError("Duplicate cluster alias", map[string]interface{}{"cluster": cluster.Name})
-			os.Exit(1)
+			if configuredClusters != nil {
+				// Explicit CLUSTER_SOURCES config: duplicates are a configuration error.
+				utils.LogError("Duplicate cluster alias", map[string]interface{}{"cluster": cluster.Name})
+				os.Exit(1)
+			}
+			// Legacy auto-discovery: ARN short-names may collide across contexts/accounts.
+			// First context (sorted, deterministic) wins; skip the rest instead of crashing.
+			utils.LogWarning("Duplicate cluster alias from kubeconfig auto-discovery, skipping", map[string]interface{}{"cluster": cluster.Name})
+			continue
 		}
 		seenClusters[cluster.Name] = struct{}{}
 		uniqueClusters = append(uniqueClusters, cluster)
@@ -312,6 +327,7 @@ func main() {
 		clientConfig.NamespaceRestricted = dataPolicy.IsRestricted()
 		clientConfig.Namespaces = dataPolicy.Namespaces(cluster.Name)
 		clientConfig.UseInCluster = cluster.InCluster
+		clientConfig.Context = cluster.Context
 		clientConfig.MaxWatchStreams = dataPolicy.MaxWatchStreams()
 		return kubernetes.NewClientWithConfig(cluster.Kubeconfig, clientConfig)
 	}
