@@ -2,6 +2,9 @@
 
 A Helm chart for deploying Trivy UI Dashboard to Kubernetes clusters. This chart provides a complete deployment solution for the Trivy UI application with support for multi-cluster management.
 
+For the complete user guide, including authentication and Dashboard scopes, see
+the [project documentation](../../docs/README.md).
+
 ## Quick Install
 
 ### From Docker Hub (Recommended)
@@ -38,8 +41,8 @@ helm install my-trivy-ui .
 - **Flexible Configuration**: Extensive customization options through values.yaml
 - **Production Ready**: Includes health checks and resource limits
 - **Ingress Support**: Built-in Ingress configuration with TLS support
-- **Optional Local Authentication**: YAML users, bcrypt passwords, groups, and multi-cluster Namespace scopes
-- **Optional Namespace Boundary**: Namespace-scoped informer and RoleBinding mode for stronger Kubernetes isolation
+- **Optional Local Authentication**: YAML users, bcrypt passwords, groups, and multi-cluster user scopes
+- **Cluster-wide Collection**: Collects Namespaced and Cluster-scoped Trivy reports with read-only RBAC
 
 ## Prerequisites
 
@@ -177,31 +180,19 @@ Generate a bcrypt hash with:
 go-server hash-password
 ```
 
-### Namespace Data Access Mode
+### Cluster-wide collection and user access
 
-The default `dataAccess.mode: cluster` preserves the existing cluster-wide behavior. For a hard Namespace boundary on the installation cluster, use:
+The chart installs a cluster-wide read-only `ClusterRole` and
+`ClusterRoleBinding` for the UI ServiceAccount. This allows the backend to
+collect both Namespaced and Cluster-scoped Trivy reports across the configured
+clusters. The discovery role is separate and only covers CRD/API discovery.
 
-```yaml
-dataAccess:
-  mode: namespaces
-  clusters:
-    incluster:
-      namespaces: [tenant-a, tenant-a-shared]
-    cluster-b:
-      namespaces: [tenant-a]
-
-rbac:
-  create: true
-  inClusterName: incluster
-```
-
-The chart creates a RoleBinding in each `incluster` Namespace. RBAC for remote kubeconfig clusters must be configured in those clusters separately. Namespace mode does not list Namespace objects or read Cluster-scoped reports.
-
-`rbac.inClusterName` is only used to render RBAC for the installation Cluster.
-It must name an entry in `dataAccess.clusters` when set. For a remote-only
-deployment, set it to an empty value; the chart then renders no Namespace
-RoleBindings, and remote Cluster permissions remain the administrator's
-responsibility.
+When local authentication is enabled, restrict each UI user with `scopes` in
+`auth.yaml`. Kubernetes RBAC controls the backend ServiceAccount; user scopes
+control what an authenticated UI user can list, inspect, and aggregate. For a
+Cluster-scoped report, include the special namespace `_` in the user's scope.
+Remote kubeconfig clusters must have equivalent read-only RBAC configured by
+the administrator in those clusters.
 
 ### Cache Capacity and Persistence
 
@@ -326,7 +317,7 @@ tolerations:
 |-----------|-------------|---------|
 | `replicaCount` | Number of replicas | `1` |
 | `image.repository` | Image repository | `locustbaby/trivy-ui` |
-| `image.tag` | Image tag | `v0.0.3` |
+| `image.tag` | Image tag | `v0.0.5` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |
 | `nameOverride` | Override chart name | `""` |
@@ -335,8 +326,8 @@ tolerations:
 | `serviceAccount.annotations` | Service account annotations | `{}` |
 | `serviceAccount.name` | Service account name | `""` |
 | `podAnnotations` | Pod annotations | `{}` |
-| `podSecurityContext` | Pod security context | `{}` |
-| `securityContext` | Container security context | `{}` |
+| `podSecurityContext` | Pod security context | `{fsGroup: 65532}` |
+| `securityContext` | Container security context | non-root, read-only root filesystem |
 | `service.type` | Service type | `ClusterIP` |
 | `service.port` | Service port | `80` |
 | `ingress.enabled` | Enable ingress | `false` |
@@ -354,9 +345,9 @@ tolerations:
 | `env.KUBECONFIG_DIR` | Kubeconfig directory | `/kubeconfigs` |
 | `env.STATIC_PATH` | Static assets path | `trivy-dashboard/dist` |
 | `env.LOG_LEVEL` | Logging level | `info` |
+| `env.CORS_ALLOWED_ORIGINS` | Credentialed cross-origin browser origins | `""` |
 | `auth.mode` | Authentication mode (`none` or `local`) | `none` |
-| `dataAccess.mode` | Data source boundary (`cluster` or `namespaces`) | `cluster` |
-| `dataAccess.maxWatchStreams` | Maximum Namespace-mode watch streams | `500` |
+| `auth.session.cookieSameSite` | Session cookie policy (`lax`, `strict`, `none`); empty derives `none` for explicit CORS origins | `""` |
 | `kubeconfigs.create` | Create kubeconfig secret | `true` |
 | `kubeconfigs.enabled` | Mount the kubeconfig secret | `true` |
 | `kubeconfigs.secretName` | Kubeconfig secret name | `kubeconfigs` |
@@ -366,7 +357,7 @@ tolerations:
 | `cache.summary.snapshotMaxSize` | Maximum summary snapshot size | `512Mi` |
 | `cache.detail.persist` | Persist full report details | `true` |
 | `cache.detail.maxSize` | In-memory detail cache limit | `256Mi` |
-| `rbac.create` | Create RBAC resources | `true` |
+| `rbac.create` | Create cluster-wide read-only RBAC resources | `true` |
 
 ## Installation Examples
 
@@ -600,5 +591,5 @@ kubectl exec -it deployment/trivy-ui -- env | grep -E "(KUBECONFIG|STATIC|LOG_LE
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/locustbaby/trivy-ui/issues)
-- **Documentation**: [Main README](../README.md)
+- **Documentation**: [User guide](../../docs/README.md) · [Main README](../../README.md)
 - **Discussions**: [GitHub Discussions](https://github.com/locustbaby/trivy-ui/discussions)

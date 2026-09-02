@@ -34,9 +34,9 @@ function GlobalHubInternal({ clusters, onSelectCluster }: GlobalHubProps) {
           api.getOverview(undefined, controller.signal),
           api.getOverviewTrends(undefined, 30, controller.signal)
         ])
-        if (generation !== generationRef.current) return
-        setGlobalData(ovData)
-        setGlobalTrends(trData)
+	        if (generation !== generationRef.current) return
+	        setGlobalData(ovData)
+	        setGlobalTrends(trData.filter((point) => point.cluster === "" && !point.namespace))
 
 	        if (generation === generationRef.current) {
 	          const trendsMap: Record<string, TrendRecord[]> = {}

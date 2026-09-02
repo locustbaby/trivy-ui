@@ -47,10 +47,10 @@ func (h *Handler) authenticateRequest(r *http.Request) (RequestAuth, int) {
 }
 
 func (h *Handler) accessSnapshot(userScope auth.ScopeSnapshot) auth.AccessSnapshot {
-	if h.dataAccess == nil {
+	if h.sourceScope == nil {
 		return auth.NewAccessSnapshot(userScope, auth.UnrestrictedScope())
 	}
-	return auth.NewAccessSnapshot(userScope, h.dataAccess.Scope())
+	return auth.NewAccessSnapshot(userScope, h.sourceScope.Scope())
 }
 
 func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
@@ -66,8 +66,7 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 }
 
 // AccessContextMiddleware supplies the data-source scope when authentication
-// is disabled. Keeping this separate from AuthMiddleware preserves namespace
-// restrictions without making disabled authentication look like a login gate.
+// is disabled without making the disabled mode look like a login gate.
 func (h *Handler) AccessContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestAuth := RequestAuth{

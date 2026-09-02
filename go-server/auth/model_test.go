@@ -51,3 +51,21 @@ func TestAccessSnapshotClusterVisibilityRequiresIntersection(t *testing.T) {
 		t.Fatal("cluster/* must overlap with a namespaced source rule")
 	}
 }
+
+func TestAccessSnapshotReportTypeVisibilityMatchesResourceScope(t *testing.T) {
+	namespacedUser := NewAccessSnapshot(
+		NewScopeSnapshot([]ScopeRule{{Cluster: "cluster-a", Namespaces: []string{"team-a"}}}),
+		UnrestrictedScope(),
+	)
+	if !namespacedUser.CanReadReportType("cluster-a", true) || namespacedUser.CanReadReportType("cluster-a", false) {
+		t.Fatal("namespaced user scope should expose only namespaced report types")
+	}
+
+	clusterUser := NewAccessSnapshot(
+		NewScopeSnapshot([]ScopeRule{{Cluster: "cluster-a", Namespaces: []string{ClusterScopedNamespace}}}),
+		UnrestrictedScope(),
+	)
+	if clusterUser.CanReadReportType("cluster-a", true) || !clusterUser.CanReadReportType("cluster-a", false) {
+		t.Fatal("cluster-only user scope should expose only cluster-scoped report types")
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"trivy-ui/auth"
 	"trivy-ui/config"
 	"trivy-ui/kubernetes"
 	"trivy-ui/utils"
@@ -1450,11 +1451,7 @@ func (c *Cache) ValidateAndCleanup(ctx context.Context) {
 						continue
 					}
 
-					informerKey := typ
-					if cc.Client.IsNamespaceRestricted() && reportKind.Namespaced {
-						informerKey = ns + "\x00" + typ
-					}
-					informer, hasInformer := informers[informerKey]
+					informer, hasInformer := informers[typ]
 					if !hasInformer {
 						continue
 					}
@@ -2132,44 +2129,49 @@ func (c *Cache) recordTrend() {
 	}
 
 	type trendCounts struct{ critical, high, medium int }
-	namespaced := make(map[string]*trendCounts)
-	namespaceNames := make(map[string]map[string]struct{})
+	scoped := make(map[string]*trendCounts)
+	scopeNames := make(map[string]map[string]struct{})
 	for _, client := range GetAllClusterClients() {
 		client.mu.RLock()
 		for _, namespace := range client.Namespaces {
-			if namespaceNames[client.Name] == nil {
-				namespaceNames[client.Name] = make(map[string]struct{})
+			if scopeNames[client.Name] == nil {
+				scopeNames[client.Name] = make(map[string]struct{})
 			}
-			namespaceNames[client.Name][namespace] = struct{}{}
+			scopeNames[client.Name][namespace] = struct{}{}
 		}
+		if scopeNames[client.Name] == nil {
+			scopeNames[client.Name] = make(map[string]struct{})
+		}
+		scopeNames[client.Name][auth.ClusterScopedNamespace] = struct{}{}
 		client.mu.RUnlock()
 	}
 	for _, report := range c.ReportSummaries() {
-		if report.Namespace == "" {
-			continue
+		scopeName := report.Namespace
+		if scopeName == "" {
+			scopeName = auth.ClusterScopedNamespace
 		}
-		if namespaceNames[report.Cluster] == nil {
-			namespaceNames[report.Cluster] = make(map[string]struct{})
+		if scopeNames[report.Cluster] == nil {
+			scopeNames[report.Cluster] = make(map[string]struct{})
 		}
-		namespaceNames[report.Cluster][report.Namespace] = struct{}{}
-		counts := namespaced[report.Cluster+"\x00"+report.Namespace]
+		scopeNames[report.Cluster][scopeName] = struct{}{}
+		counts := scoped[report.Cluster+"\x00"+scopeName]
 		if counts == nil {
 			counts = &trendCounts{}
-			namespaced[report.Cluster+"\x00"+report.Namespace] = counts
+			scoped[report.Cluster+"\x00"+scopeName] = counts
 		}
 		counts.critical, counts.high, counts.medium, _ = addSummaryCounts(counts.critical, counts.high, counts.medium, report)
 	}
-	for clusterName, namespaces := range namespaceNames {
-		for namespaceName := range namespaces {
-			key := clusterName + "\x00" + namespaceName
-			counts := namespaced[key]
+	for clusterName, scopes := range scopeNames {
+		for scopeName := range scopes {
+			key := clusterName + "\x00" + scopeName
+			counts := scoped[key]
 			if counts == nil {
 				counts = &trendCounts{}
 			}
 			records = append(records, TrendRecord{
 				Timestamp: now,
 				Cluster:   clusterName,
-				Namespace: namespaceName,
+				Namespace: scopeName,
 				Critical:  counts.critical,
 				High:      counts.high,
 				Medium:    counts.medium,
@@ -2263,7 +2265,7 @@ func (c *Cache) GetTrends(clusterFilter string, days int) []TrendRecord {
 	for _, r := range records {
 		clusterMatches := r.Cluster == clusterFilter
 		if clusterFilter == "" {
-			clusterMatches = r.Cluster == "" || r.Namespace != ""
+			clusterMatches = true
 		}
 		if clusterMatches && r.Timestamp.After(cutoff) {
 			filtered = append(filtered, r)

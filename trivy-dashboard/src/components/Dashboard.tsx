@@ -276,8 +276,9 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
   }, [updateUrlParams])
 
   const handleSelectNamespace = useCallback((ns: string) => {
-    updateUrlParams({ type: "VulnerabilityReport", namespace: ns })
-  }, [updateUrlParams])
+    const vulnerabilityType = reportTypes.find((type) => type.name === "vulnerabilityreports")
+    updateUrlParams({ type: vulnerabilityType?.name ?? null, namespace: ns })
+  }, [reportTypes, updateUrlParams])
 
   const handleSelectWorkload = useCallback((w: WorkloadSummary) => {
     updateUrlParams({

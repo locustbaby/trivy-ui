@@ -134,8 +134,9 @@ type apiEnvelopeForAuth struct {
 }
 
 var (
-	allScope   = []auth.ScopeRule{{Cluster: "*", Namespaces: []string{"*"}}}
-	teamAScope = []auth.ScopeRule{{Cluster: "prod", Namespaces: []string{"team-a"}}}
+	allScope     = []auth.ScopeRule{{Cluster: "*", Namespaces: []string{"*", "_"}}}
+	teamAScope   = []auth.ScopeRule{{Cluster: "prod", Namespaces: []string{"team-a"}}}
+	clusterScope = []auth.ScopeRule{{Cluster: "prod", Namespaces: []string{"_"}}}
 )
 
 func authFlowReports() map[string][]Report {
@@ -143,7 +144,16 @@ func authFlowReports() map[string][]Report {
 	mk := func(ns, name string) Report {
 		return Report{Type: "vulns", Cluster: "prod", Namespace: ns, Name: name, UpdatedAt: now}
 	}
-	return map[string][]Report{"vulns": {mk("team-a", "allowed-one"), mk("team-a", "allowed-two"), mk("team-b", "forbidden-one")}}
+	return map[string][]Report{
+		"vulns": {
+			mk("team-a", "allowed-one"),
+			mk("team-a", "allowed-two"),
+			mk("team-b", "forbidden-one"),
+		},
+		"cluster-vulns": {
+			{Type: "cluster-vulns", Cluster: "prod", Name: "cluster-report", UpdatedAt: now},
+		},
+	}
 }
 
 func TestAuthFlow_RequiresLogin(t *testing.T) {
@@ -212,6 +222,39 @@ func TestAuthFlow_UserWithoutScopeSeesNothing(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(string(env.Data)), "allowed-") || strings.Contains(string(env.Data), "forbidden-") {
 		t.Fatalf("user without scope must see no reports, got %s", string(env.Data))
+	}
+}
+
+func TestAuthFlow_NamespacedScopeCannotSeeClusterScopedReports(t *testing.T) {
+	server, _ := newAuthTestServer(t, newAuthService(t, []authUser{
+		{username: "bob", password: "bob-pass", scopes: teamAScope},
+	}), authFlowReports())
+
+	resp := login(t, server.URL, "bob", "bob-pass")
+	cookies := resp.Cookies()
+	resp.Body.Close()
+
+	status, env := getWithCookies(t, server.URL+"/api/v1/reports?type=cluster-vulns", cookies)
+	if status != http.StatusOK {
+		t.Fatalf("cluster-scoped list: status=%d", status)
+	}
+	if strings.Contains(strings.ToLower(string(env.Data)), "cluster-report") {
+		t.Fatalf("namespaced scope must not see cluster-scoped reports: %s", env.Data)
+	}
+}
+
+func TestAuthFlow_ClusterScopeCanSeeClusterScopedReports(t *testing.T) {
+	server, _ := newAuthTestServer(t, newAuthService(t, []authUser{
+		{username: "dana", password: "dana-pass", scopes: clusterScope},
+	}), authFlowReports())
+
+	resp := login(t, server.URL, "dana", "dana-pass")
+	cookies := resp.Cookies()
+	resp.Body.Close()
+
+	status, env := getWithCookies(t, server.URL+"/api/v1/reports?type=cluster-vulns", cookies)
+	if status != http.StatusOK || !strings.Contains(strings.ToLower(string(env.Data)), "cluster-report") {
+		t.Fatalf("cluster scope should see cluster-scoped report: status=%d data=%s", status, env.Data)
 	}
 }
 

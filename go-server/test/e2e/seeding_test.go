@@ -43,6 +43,7 @@ const (
 )
 
 var baseURL string
+var e2eHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 func TestMain(m *testing.M) {
 	baseURL = getenv("E2E_BASE_URL", "http://127.0.0.1:8099")
@@ -72,7 +73,7 @@ func waitForConvergence(timeout time.Duration) error {
 	want := len(namespaces) * vulnsPerNamespace
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/api/v1/reports?type=vulnerabilityreports&pageSize=1")
+		resp, err := e2eHTTPClient.Get(baseURL + "/api/v1/reports?type=vulnerabilityreports&pageSize=1")
 		if err == nil {
 			var env struct {
 				Data struct {
@@ -100,7 +101,7 @@ func getenv(key, def string) string {
 func waitForReady(ctx context.Context) error {
 	deadline := time.Now().Add(readyTimeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/readyz")
+		resp, err := e2eHTTPClient.Get(baseURL + "/readyz")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {

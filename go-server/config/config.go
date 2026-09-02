@@ -20,7 +20,7 @@ func Get() *Config {
 		config = &Config{
 			Host:       getEnv("HOST", "0.0.0.0"),
 			Port:       getEnvInt("PORT", 8080),
-			DataPath:   getEnv("DATA_PATH", "."),
+			DataPath:   getEnv("DATA_PATH", "/tmp/trivy-ui-data"),
 			StaticPath: getEnv("STATIC_PATH", "static"),
 		}
 	}

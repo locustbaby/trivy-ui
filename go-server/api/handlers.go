@@ -180,12 +180,12 @@ type TrendRecord struct {
 }
 
 type Handler struct {
-	cache      CacheService
-	clusterReg *ClusterRegistry
-	querySvc   QueryService
-	crdReg     *config.CRDRegistry
-	auth       *auth.Service
-	dataAccess *dataaccess.Policy
+	cache       CacheService
+	clusterReg  *ClusterRegistry
+	querySvc    QueryService
+	crdReg      *config.CRDRegistry
+	auth        *auth.Service
+	sourceScope *dataaccess.Policy
 }
 
 type CacheService interface {
@@ -315,14 +315,14 @@ func (h *Handler) reportSummaries() []Report {
 	return reports
 }
 
-func NewHandler(k8sClient *kubernetes.Client, cache CacheService, clusterReg *ClusterRegistry, querySvc QueryService, crdReg *config.CRDRegistry, authService *auth.Service, dataPolicy *dataaccess.Policy) *Handler {
+func NewHandler(k8sClient *kubernetes.Client, cache CacheService, clusterReg *ClusterRegistry, querySvc QueryService, crdReg *config.CRDRegistry, authService *auth.Service, sourceScope *dataaccess.Policy) *Handler {
 	return &Handler{
-		cache:      cache,
-		clusterReg: clusterReg,
-		querySvc:   querySvc,
-		crdReg:     crdReg,
-		auth:       authService,
-		dataAccess: dataPolicy,
+		cache:       cache,
+		clusterReg:  clusterReg,
+		querySvc:    querySvc,
+		crdReg:      crdReg,
+		auth:        authService,
+		sourceScope: sourceScope,
 	}
 }
 
@@ -450,7 +450,7 @@ func (h *Handler) reportTypesForScope(cluster string, scope auth.AccessSnapshot)
 		if !scope.CanReadCluster(cluster) || h.clusterReg.Get(cluster) == nil {
 			return []config.ReportKind{}
 		}
-		return h.reportTypes(cluster)
+		return filterReportTypesForScope(cluster, h.reportTypes(cluster), scope)
 	}
 	merged := make(map[string]config.ReportKind)
 	clients := h.clusterReg.All()
@@ -465,6 +465,9 @@ func (h *Handler) reportTypesForScope(cluster string, scope auth.AccessSnapshot)
 			continue
 		}
 		for _, reportType := range client.Registry.GetAllReports() {
+			if !scope.CanReadReportType(name, reportType.Namespaced) {
+				continue
+			}
 			merged[reportType.Name] = reportType
 		}
 	}
@@ -476,18 +479,19 @@ func (h *Handler) reportTypesForScope(cluster string, scope auth.AccessSnapshot)
 	return result
 }
 
+func filterReportTypesForScope(cluster string, reportTypes []config.ReportKind, scope auth.AccessSnapshot) []config.ReportKind {
+	filtered := make([]config.ReportKind, 0, len(reportTypes))
+	for _, reportType := range reportTypes {
+		if scope.CanReadReportType(cluster, reportType.Namespaced) {
+			filtered = append(filtered, reportType)
+		}
+	}
+	return filtered
+}
+
 func (h *Handler) GetReportTypes(w http.ResponseWriter, r *http.Request) {
 	markDeprecated(w, r, "/api/v1/report-types")
 	reportTypes := h.reportTypesForScope(r.URL.Query().Get("cluster"), requestAuth(r).Access)
-	if h.dataAccess != nil && h.dataAccess.IsRestricted() {
-		filtered := reportTypes[:0]
-		for _, reportType := range reportTypes {
-			if reportType.Namespaced {
-				filtered = append(filtered, reportType)
-			}
-		}
-		reportTypes = filtered
-	}
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
 		Message: "Success",
@@ -498,15 +502,6 @@ func (h *Handler) GetReportTypes(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetTypesV1(w http.ResponseWriter, r *http.Request) {
 	markDeprecated(w, r, "/api/v1/report-types")
 	reportTypes := h.reportTypesForScope(r.URL.Query().Get("cluster"), requestAuth(r).Access)
-	if h.dataAccess != nil && h.dataAccess.IsRestricted() {
-		filtered := reportTypes[:0]
-		for _, reportType := range reportTypes {
-			if reportType.Namespaced {
-				filtered = append(filtered, reportType)
-			}
-		}
-		reportTypes = filtered
-	}
 	writeJSON(w, http.StatusOK, Response{
 		Code:    CodeSuccess,
 		Message: "Success",
@@ -884,6 +879,9 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 }
 
 func (h *Handler) getReportDetails(w http.ResponseWriter, r *http.Request, cluster, namespace, typeName, reportName string, allowFallback bool) {
+	if namespace == auth.ClusterScopedNamespace {
+		namespace = ""
+	}
 	if cluster == "" {
 		if !allowFallback {
 			writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "Missing cluster parameter")
@@ -1278,19 +1276,24 @@ func (h *Handler) getTrendsForScope(cluster string, days int, scope auth.AccessS
 		cluster string
 	}
 	aggregates := make(map[trendKey]TrendRecord)
+	add := func(key trendKey, record TrendRecord) {
+		aggregate := aggregates[key]
+		aggregate.Timestamp = key.bucket
+		aggregate.Cluster = key.cluster
+		aggregate.Critical += record.Critical
+		aggregate.High += record.High
+		aggregate.Medium += record.Medium
+		aggregates[key] = aggregate
+	}
 	for _, record := range records {
 		if record.Namespace == "" || !scope.CanRead(record.Cluster, record.Namespace) {
 			continue
 		}
 		bucket := record.Timestamp.UTC().Truncate(time.Hour)
-		key := trendKey{bucket: bucket, cluster: record.Cluster}
-		aggregate := aggregates[key]
-		aggregate.Timestamp = bucket
-		aggregate.Cluster = record.Cluster
-		aggregate.Critical += record.Critical
-		aggregate.High += record.High
-		aggregate.Medium += record.Medium
-		aggregates[key] = aggregate
+		add(trendKey{bucket: bucket, cluster: record.Cluster}, record)
+		if cluster == "" {
+			add(trendKey{bucket: bucket}, record)
+		}
 	}
 
 	filtered := make([]TrendRecord, 0, len(aggregates))

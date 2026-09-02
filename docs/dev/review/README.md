@@ -4,6 +4,7 @@
 
 | 日期 | 基线 | 文档 | 重点内容 |
 | --- | --- | --- | --- |
+| 2026-09-02 | `main...working tree` | [测试覆盖与模块化评审](./2026-09-02-test-coverage-and-architecture.md) | v0.0.5 覆盖率基线、功能场景矩阵、跨站 Cookie/授权趋势修复、E2E 缺口与 API/前端渐进拆分方案 |
 | 2026-08-20 | `87b7848` | [前后端架构、UI/UX 交互与数据正确性综合评审](./2026-08-20-project-review.md) | 多集群身份与 ACL、缓存正确性、前端 UI 配色/抽屉/Fixable 过滤/组件规范 (15个Lint问题) 及性能容量评估 |
 | 2026-08-20 | working tree | [Detail Cache 决策修订](./2026-08-20-cache-decision.md) | 恢复独立 Detail Snapshot，明确 stale、容量、权限和数据生命周期 |
 | 2026-08-20 | working tree | [缓存与前端渲染性能跟进](./2026-08-20-performance-followup.md) | Query Cache、Summary 快照、首屏懒加载和后续基准计划 |

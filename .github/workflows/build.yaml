@@ -67,9 +67,10 @@ jobs:
           helm lint charts/trivy-ui
           helm template trivy-ui charts/trivy-ui --set auth.mode=none >/tmp/trivy-ui-none.yaml
           helm template trivy-ui charts/trivy-ui --set auth.mode=local --set auth.local.existingSecret=trivy-ui-auth >/tmp/trivy-ui-local.yaml
-          helm template trivy-ui charts/trivy-ui --set dataAccess.mode=namespaces --set dataAccess.clusters.incluster.namespaces[0]=tenant-a >/tmp/trivy-ui-ns.yaml
-          helm template trivy-ui charts/trivy-ui --set dataAccess.mode=namespaces --set rbac.inClusterName= --set dataAccess.clusters.remote.namespaces[0]=tenant-a >/tmp/trivy-ui-remote-ns.yaml
-          if grep -q 'kind: RoleBinding' /tmp/trivy-ui-remote-ns.yaml; then echo 'unexpected local RoleBinding for remote-only mode'; exit 1; fi
+          test "$(grep -c '^kind: ClusterRole$' /tmp/trivy-ui-none.yaml)" -eq 2
+          test "$(grep -c '^kind: ClusterRoleBinding$' /tmp/trivy-ui-none.yaml)" -eq 2
+          grep -A3 '^kind: ClusterRole$' /tmp/trivy-ui-none.yaml | grep -q '^  name: trivy-ui$'
+          grep -A3 '^kind: ClusterRoleBinding$' /tmp/trivy-ui-none.yaml | grep -q '^  name: trivy-ui$'
 
   e2e-kwok:
     name: E2E (kwok)
@@ -186,22 +187,26 @@ jobs:
 
       - name: Extract branch or tag name and set version
         id: extract_tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref }}
         run: |
           # First, determine the Docker tag
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BRANCH_NAME="${{ github.head_ref }}"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            BRANCH_NAME="$HEAD_REF"
             BRANCH_NAME=$(echo "${BRANCH_NAME}" | sed 's|/|-|g')
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
-          elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
-            BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's|refs/heads/||')
+          elif [[ "$REF_NAME" == refs/heads/* ]]; then
+            BRANCH_NAME=$(echo "$REF_NAME" | sed 's|refs/heads/||')
             BRANCH_NAME=$(echo "${BRANCH_NAME}" | sed 's|/|-|g')
             TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
             SHORT_SHA=$(git rev-parse --short HEAD)
             TAG_NAME="${BRANCH_NAME}-${TIMESTAMP}-${SHORT_SHA}"
-          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG_NAME=$(echo "${{ github.ref }}" | sed 's|refs/tags/||')
+          elif [[ "$REF_NAME" == refs/tags/* ]]; then
+            TAG_NAME=$(echo "$REF_NAME" | sed 's|refs/tags/||')
           else
             TAG_NAME="latest"
           fi
@@ -209,9 +214,9 @@ jobs:
           echo "Docker Tag: $TAG_NAME"
 
           # Now, determine the version for the build
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          if [[ "$REF_NAME" == refs/tags/* ]]; then
             # If this is a tag push, use the tag as the version (without the 'v' prefix for semantic version)
-            VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/v||')
+            VERSION=$(echo "$REF_NAME" | sed 's|refs/tags/v||')
           else
             # For non-tag builds, use a development version based on date and commit
             TIMESTAMP=$(date -u +"%Y%m%d")

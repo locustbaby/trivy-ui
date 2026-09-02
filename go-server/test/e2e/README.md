@@ -23,12 +23,13 @@ asserts:
   a second traversal with a different page size produce byte-identical order;
   output equals lexicographic sort-key order.
 - **Data correctness**: overview severity totals and per-type scanned counts
-  equal sums computed from the CRs themselves; the detail endpoint returns the
-  actual CR content for a known report.
+  equal sums computed from the CRs themselves; detail endpoints return the
+  actual CR content for known Namespaced and Cluster-scoped reports (the latter
+  through the `_` route segment).
 - **Filters**: namespace (single/multi/spaced), `onlyVulnerable` and search are
   validated against expectations computed from the seeded CRs.
 - **Error matrix**: unknown report type → `400 VALIDATION_FAILED`, unknown
-  cluster / nonexistent report → `503 PROVIDER_UNAVAILABLE`, missing type param
+  cluster → `403 ACCESS_DENIED`, nonexistent report → `503 PROVIDER_UNAVAILABLE`, missing type param
   → `400 VALIDATION_FAILED`, invalid paging params degrade to safe defaults.
 - **Live updates**: creating a CR via the dynamic client makes it appear
   through the informer watch within seconds; deleting it removes it.

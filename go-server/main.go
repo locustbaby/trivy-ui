@@ -67,6 +67,37 @@ type clusterSourceConfig struct {
 	Key  string `json:"key,omitempty"`
 }
 
+type corsSettings struct {
+	allowedOrigins   []string
+	allowCredentials bool
+}
+
+func corsSettingsFromEnv() corsSettings {
+	settings := corsSettings{allowedOrigins: []string{"*"}}
+	rawOrigins := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if rawOrigins == "" {
+		return settings
+	}
+	settings.allowedOrigins = nil
+	for _, origin := range strings.Split(rawOrigins, ",") {
+		if trimmed := strings.TrimSpace(origin); trimmed != "" {
+			settings.allowedOrigins = append(settings.allowedOrigins, trimmed)
+		}
+	}
+	if len(settings.allowedOrigins) == 0 {
+		settings.allowedOrigins = []string{"*"}
+		return settings
+	}
+	settings.allowCredentials = !(len(settings.allowedOrigins) == 1 && settings.allowedOrigins[0] == "*")
+	return settings
+}
+
+func applyCORSCookiePolicy(cfg *auth.Config, settings corsSettings, sameSiteExplicit bool) {
+	if settings.allowCredentials && !sameSiteExplicit {
+		cfg.CookieSameSite = "none"
+	}
+}
+
 func validClusterAlias(alias string) bool {
 	if alias == "" || len(alias) > 63 {
 		return false
@@ -94,7 +125,7 @@ func legacyDisplayName(contextName string) string {
 	return contextName
 }
 
-func loadConfiguredClusters(dir string, policy *dataaccess.Policy) ([]clusterInfo, error) {
+func loadConfiguredClusters(dir string) ([]clusterInfo, error) {
 	raw := strings.TrimSpace(os.Getenv("CLUSTER_SOURCES"))
 	if raw == "" {
 		return nil, nil
@@ -104,12 +135,6 @@ func loadConfiguredClusters(dir string, policy *dataaccess.Policy) ([]clusterInf
 	if err := json.Unmarshal([]byte(raw), &sources); err != nil {
 		return nil, fmt.Errorf("parse CLUSTER_SOURCES: %w", err)
 	}
-	for _, alias := range policy.ConfiguredClusters() {
-		if _, ok := sources[alias]; !ok {
-			return nil, fmt.Errorf("data access policy references unknown cluster source %q", alias)
-		}
-	}
-
 	aliases := make([]string, 0, len(sources))
 	for alias := range sources {
 		aliases = append(aliases, alias)
@@ -122,10 +147,6 @@ func loadConfiguredClusters(dir string, policy *dataaccess.Policy) ([]clusterInf
 		if !validClusterAlias(alias) {
 			return nil, fmt.Errorf("invalid cluster alias %q", alias)
 		}
-		if !policy.ShouldInitialize(alias) {
-			continue
-		}
-
 		switch source.Type {
 		case "inCluster":
 			clusters = append(clusters, clusterInfo{Name: alias, InCluster: true})
@@ -154,19 +175,21 @@ func main() {
 		return
 	}
 	cfg := config.Get()
+	corsSettings := corsSettingsFromEnv()
 	authConfig, err := auth.ConfigFromEnv()
 	if err != nil {
 		utils.LogError("Failed to parse authentication configuration", map[string]interface{}{"error": err.Error()})
 		os.Exit(1)
 	}
+	applyCORSCookiePolicy(&authConfig, corsSettings, os.Getenv("AUTH_COOKIE_SAME_SITE") != "")
 	authService, err := auth.NewService(authConfig)
 	if err != nil {
 		utils.LogError("Failed to initialize authentication", map[string]interface{}{"error": err.Error()})
 		os.Exit(1)
 	}
-	dataPolicy, err := dataaccess.NewFromEnv()
+	sourceScope, err := dataaccess.NewFromEnv()
 	if err != nil {
-		utils.LogError("Failed to initialize data access policy", map[string]interface{}{"error": err.Error()})
+		utils.LogError("Failed to initialize cluster source scope", map[string]interface{}{"error": err.Error()})
 		os.Exit(1)
 	}
 	if err := api.ValidateTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS")); err != nil {
@@ -215,7 +238,7 @@ func main() {
 	}
 
 	var clustersToInit []clusterInfo
-	configuredClusters, err := loadConfiguredClusters(kubeconfigDir, dataPolicy)
+	configuredClusters, err := loadConfiguredClusters(kubeconfigDir)
 	if err != nil {
 		utils.LogError("Failed to load explicit cluster sources", map[string]interface{}{"error": err.Error()})
 		os.Exit(1)
@@ -252,10 +275,6 @@ func main() {
 					sort.Strings(contextNames) // deterministic startup order per file
 					for _, contextName := range contextNames {
 						displayName := legacyDisplayName(contextName)
-						if !dataPolicy.ShouldInitialize(displayName) {
-							utils.LogInfo("Skipping cluster outside data access policy", map[string]interface{}{"file": file.Name(), "cluster": displayName})
-							continue
-						}
 						if !validClusterAlias(displayName) {
 							utils.LogWarning("Skipping kubeconfig context with invalid legacy cluster alias", map[string]interface{}{"file": file.Name(), "cluster": displayName})
 							continue
@@ -266,9 +285,7 @@ func main() {
 			}
 		}
 		if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-			if dataPolicy.ShouldInitialize("incluster") {
-				clustersToInit = append(clustersToInit, clusterInfo{Name: "incluster", InCluster: true})
-			}
+			clustersToInit = append(clustersToInit, clusterInfo{Name: "incluster", InCluster: true})
 		}
 		kubeconfig := os.Getenv("KUBECONFIG")
 		if kubeconfig == "" {
@@ -285,10 +302,6 @@ func main() {
 				sort.Strings(contextNames) // deterministic first-cluster + stable startup order
 				for _, contextName := range contextNames {
 					displayName := legacyDisplayName(contextName)
-					if !dataPolicy.ShouldInitialize(displayName) {
-						utils.LogInfo("Skipping cluster outside data access policy", map[string]interface{}{"cluster": displayName})
-						continue
-					}
 					if !validClusterAlias(displayName) {
 						utils.LogWarning("Skipping kubeconfig context with invalid legacy cluster alias", map[string]interface{}{"cluster": displayName})
 						continue
@@ -320,15 +333,13 @@ func main() {
 	for _, cluster := range clustersToInit {
 		activeAliases = append(activeAliases, cluster.Name)
 	}
+	sourceScope.SetInitializedClusters(activeAliases)
 	api.PruneClusterCache(activeAliases)
 
 	newKubernetesClient := func(cluster clusterInfo) (*kubernetes.Client, error) {
 		clientConfig := kubernetes.DefaultClientConfig()
-		clientConfig.NamespaceRestricted = dataPolicy.IsRestricted()
-		clientConfig.Namespaces = dataPolicy.Namespaces(cluster.Name)
 		clientConfig.UseInCluster = cluster.InCluster
 		clientConfig.Context = cluster.Context
-		clientConfig.MaxWatchStreams = dataPolicy.MaxWatchStreams()
 		return kubernetes.NewClientWithConfig(cluster.Kubeconfig, clientConfig)
 	}
 
@@ -487,7 +498,7 @@ func main() {
 		for cluster := range clients {
 			initializedClusters = append(initializedClusters, cluster)
 		}
-		dataPolicy.SetInitializedClusters(initializedClusters)
+		sourceScope.SetInitializedClusters(initializedClusters)
 
 		api.SetWarmupCompleted()
 
@@ -548,11 +559,11 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	router := api.NewRouter(firstClient, staticPath, cacheSvc, clusterRegistry, config.GetGlobalRegistry(), authService, dataPolicy)
+	router := api.NewRouter(firstClient, staticPath, cacheSvc, clusterRegistry, config.GetGlobalRegistry(), authService, sourceScope)
 	utils.LogInfo("Router created")
 
 	corsHandler := cors.New(cors.Options{
-		AllowedOrigins: []string{"*"},
+		AllowedOrigins: corsSettings.allowedOrigins,
 		AllowedMethods: []string{
 			http.MethodGet,
 			http.MethodPost,
@@ -569,7 +580,7 @@ func main() {
 			"Cache-Control",
 		},
 		ExposedHeaders:     []string{"Link"},
-		AllowCredentials:   false,
+		AllowCredentials:   corsSettings.allowCredentials,
 		MaxAge:             300,
 		OptionsPassthrough: false,
 		Debug:              false,

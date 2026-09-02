@@ -23,6 +23,7 @@ type Config struct {
 	SessionSecret   string
 	SessionDuration time.Duration
 	CookieSecure    bool
+	CookieSameSite  string
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -41,6 +42,7 @@ func ConfigFromEnv() (Config, error) {
 		SessionSecret:   os.Getenv("AUTH_SESSION_SECRET"),
 		SessionDuration: duration,
 		CookieSecure:    secure,
+		CookieSameSite:  getEnv("AUTH_COOKIE_SAME_SITE", "lax"),
 	}, nil
 }
 
@@ -59,7 +61,7 @@ func NewService(cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	manager, err := NewCookieSessionManager([]byte(cfg.SessionSecret), cfg.SessionDuration, cfg.CookieSecure)
+	manager, err := NewCookieSessionManager([]byte(cfg.SessionSecret), cfg.SessionDuration, cfg.CookieSecure, cfg.CookieSameSite)
 	if err != nil {
 		return nil, err
 	}

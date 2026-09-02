@@ -8,7 +8,7 @@ image:
   repository: locustbaby/trivy-ui
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "v0.0.3"
+  tag: "v0.0.5"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -25,16 +25,18 @@ serviceAccount:
 
 podAnnotations: {}
 
-podSecurityContext: {}
-  # fsGroup: 2000
+podSecurityContext:
+  fsGroup: 65532
 
-securityContext: {}
-  # capabilities:
-  #   drop:
-  #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
-  # runAsUser: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
 
 service:
   type: ClusterIP
@@ -81,6 +83,8 @@ env:
   DATA_PATH: "/cache"
   # LOG_LEVEL: debug, info, warning, or error
   LOG_LEVEL: "info"
+  # CORS_ALLOWED_ORIGINS: Comma-separated browser origins for cross-origin auth
+  CORS_ALLOWED_ORIGINS: ""
 
 # Operator-defined support page shown by the UI on authentication failures,
 # access denials and service unavailability. Rendered natively by the UI
@@ -113,20 +117,9 @@ auth:
   session:
     duration: 12h
     cookieSecure: true
-
-# Kubernetes data source boundary. In namespaces mode, clusters is a map of
-# application cluster aliases to explicit Namespace lists.
-dataAccess:
-  mode: cluster # cluster | namespaces
-  maxWatchStreams: 500
-  clusters: {}
-  # incluster:
-  #   namespaces:
-  #     - tenant-a
-  #     - tenant-a-shared
-  # cluster-b:
-  #   namespaces:
-  #     - tenant-a
+    # Empty derives a secure cross-site policy when CORS_ALLOWED_ORIGINS names exact origins.
+    # Set lax, strict, or none to override the derived policy explicitly.
+    cookieSameSite: ""
 
 # Kubeconfig secret configuration
 kubeconfigs:
@@ -176,5 +169,3 @@ cache:
 rbac:
   # Specifies whether RBAC resources should be created
   create: true
-  # ClusterRole and bindings will be created if this is true
-  inClusterName: incluster

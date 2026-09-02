@@ -76,12 +76,8 @@ spec:
               value: {{ .Values.auth.session.duration | quote }}
             - name: AUTH_COOKIE_SECURE
               value: {{ .Values.auth.session.cookieSecure | quote }}
-            - name: DATA_ACCESS_MODE
-              value: {{ .Values.dataAccess.mode | quote }}
-            - name: DATA_ACCESS_MAX_WATCH_STREAMS
-              value: {{ .Values.dataAccess.maxWatchStreams | quote }}
-            - name: DATA_ACCESS_CLUSTERS
-              value: {{ .Values.dataAccess.clusters | toJson | quote }}
+            - name: AUTH_COOKIE_SAME_SITE
+              value: {{ .Values.auth.session.cookieSameSite | quote }}
             - name: CLUSTER_SOURCES
               value: {{ if .Values.clusterSources }}{{ .Values.clusterSources | toJson | quote }}{{ else }}""{{ end }}
             - name: CACHE_DETAIL_MAX_SIZE
@@ -144,6 +140,7 @@ spec:
             {{- if and .Values.kubeconfigs.enabled .Values.kubeconfigs.secretName }}
             - name: kubeconfigs
               mountPath: /kubeconfigs
+              readOnly: true
             {{- end }}
             {{- if .Values.cache.enabled }}
             - name: cache

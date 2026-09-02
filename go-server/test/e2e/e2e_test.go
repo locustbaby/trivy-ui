@@ -67,7 +67,7 @@ type clusterInfo struct {
 
 func apiGet(t testing.TB, path string) (int, apiEnvelope) {
 	t.Helper()
-	resp, err := http.Get(baseURL + path)
+	resp, err := e2eHTTPClient.Get(baseURL + path)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}
@@ -537,6 +537,44 @@ func TestDetailEndpointReturnsCRContent(t *testing.T) {
 		t.Fatalf("decode detail: %v (%s)", err, string(raw))
 	}
 	if detail.Ref.Name != target.ref.Name || detail.Ref.Namespace != target.ref.Namespace {
+		t.Errorf("detail ref mismatch: %+v", detail.Ref)
+	}
+	crit, _ := detail.Data.Report.Summary["criticalCount"].(float64)
+	if int(crit) != target.summary["criticalCount"] {
+		t.Errorf("detail summary.criticalCount=%.0f, want %d", crit, target.summary["criticalCount"])
+	}
+}
+
+func TestClusterScopedDetailEndpointReturnsCRContent(t *testing.T) {
+	gt := loadGroundTruth(t)
+	var target *seededReport
+	for i := range gt.reports {
+		r := gt.reports[i]
+		if r.ref.Type == "clustervulnerabilityreports" && r.hasSummary && r.summary["criticalCount"] > 0 {
+			target = &gt.reports[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("no suitable clustervulnerabilityreport found for detail check")
+	}
+
+	path := fmt.Sprintf("/api/v1/reports/%s/%s/_/%s",
+		gt.clusterName, target.ref.Type, target.ref.Name)
+	env := expectOK(t, path)
+	raw, _ := json.Marshal(env.Data)
+	var detail struct {
+		Ref  reportRef `json:"ref"`
+		Data struct {
+			Report struct {
+				Summary map[string]interface{} `json:"summary"`
+			} `json:"report"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &detail); err != nil {
+		t.Fatalf("decode detail: %v (%s)", err, string(raw))
+	}
+	if detail.Ref.Name != target.ref.Name || detail.Ref.Namespace != "" {
 		t.Errorf("detail ref mismatch: %+v", detail.Ref)
 	}
 	crit, _ := detail.Data.Report.Summary["criticalCount"].(float64)

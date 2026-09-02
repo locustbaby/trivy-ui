@@ -21,7 +21,6 @@ rules:
       - /version
     verbs:
       - get
-  {{- if eq .Values.dataAccess.mode "cluster" }}
   - apiGroups:
       - ""
     resources:
@@ -29,5 +28,4 @@ rules:
     verbs:
       - get
       - list
-  {{- end }}
 {{- end }}

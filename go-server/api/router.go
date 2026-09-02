@@ -20,10 +20,10 @@ type Router struct {
 	errorPage *customErrorPage
 }
 
-func NewRouter(k8sClient *kubernetes.Client, staticPath string, cache CacheService, clusterReg *ClusterRegistry, crdReg *config.CRDRegistry, authService *auth.Service, dataPolicy *dataaccess.Policy) *Router {
+func NewRouter(k8sClient *kubernetes.Client, staticPath string, cache CacheService, clusterReg *ClusterRegistry, crdReg *config.CRDRegistry, authService *auth.Service, sourceScope *dataaccess.Policy) *Router {
 	r := &Router{
 		mux:       http.NewServeMux(),
-		handler:   NewHandler(k8sClient, cache, clusterReg, NewQueryService(cache), crdReg, authService, dataPolicy),
+		handler:   NewHandler(k8sClient, cache, clusterReg, NewQueryService(cache), crdReg, authService, sourceScope),
 		errorPage: newCustomErrorPage(os.Getenv("ERROR_PAGE_FILE")),
 	}
 	r.Setup(staticPath)

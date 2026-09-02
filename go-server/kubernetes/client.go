@@ -21,13 +21,10 @@ import (
 )
 
 type Client struct {
-	clientset       *kubernetes.Clientset
-	dynamic         dynamic.Interface
-	config          *rest.Config
-	informer        *ReportInformerManager
-	namespaces      []string
-	restricted      bool
-	maxWatchStreams int
+	clientset *kubernetes.Clientset
+	dynamic   dynamic.Interface
+	config    *rest.Config
+	informer  *ReportInformerManager
 }
 
 // ClientConfig holds configuration for K8s client
@@ -37,25 +34,21 @@ type ClientConfig struct {
 	// Burst is the maximum burst for throttle
 	Burst int
 	// Timeout is the request timeout
-	Timeout             time.Duration
-	Namespaces          []string
-	NamespaceRestricted bool
+	Timeout time.Duration
 	// UseInCluster forces the client to use the pod's service account. When false,
 	// an explicit kubeconfig is always honored, including when running in a pod.
 	UseInCluster bool
 	// Context selects a specific context within the kubeconfig file. When empty,
 	// the file's current-context is used.
-	Context         string
-	MaxWatchStreams int
+	Context string
 }
 
 // DefaultClientConfig returns sensible defaults for multi-cluster deployments
 func DefaultClientConfig() ClientConfig {
 	return ClientConfig{
-		QPS:             20, // 20 QPS per cluster (conservative for 20 clusters)
-		Burst:           30, // Allow short bursts
-		MaxWatchStreams: 500,
-		Timeout:         0, // No global timeout - let individual requests set their own context timeouts
+		QPS:     20, // 20 QPS per cluster (conservative for 20 clusters)
+		Burst:   30, // Allow short bursts
+		Timeout: 0,  // No global timeout - let individual requests set their own context timeouts
 		// Note: Don't set a global timeout as it breaks Watch (long-running connections)
 		// Use context.WithTimeout for individual requests instead
 	}
@@ -130,19 +123,13 @@ func NewClientWithConfig(kubeconfig string, clientConfig ClientConfig) (*Client,
 	}
 
 	return &Client{
-		clientset:       clientset,
-		dynamic:         dynamicClient,
-		config:          config,
-		namespaces:      append([]string(nil), clientConfig.Namespaces...),
-		restricted:      clientConfig.NamespaceRestricted,
-		maxWatchStreams: clientConfig.MaxWatchStreams,
+		clientset: clientset,
+		dynamic:   dynamicClient,
+		config:    config,
 	}, nil
 }
 
 func (c *Client) GetNamespaces(ctx context.Context) ([]string, error) {
-	if c.restricted {
-		return append([]string(nil), c.namespaces...), nil
-	}
 	namespaces, err := c.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -153,10 +140,6 @@ func (c *Client) GetNamespaces(ctx context.Context) ([]string, error) {
 		names = append(names, ns.Name)
 	}
 	return names, nil
-}
-
-func (c *Client) IsNamespaceRestricted() bool {
-	return c.restricted
 }
 
 func parseAPIVersion(apiVersion string) (group, version string) {
@@ -174,12 +157,6 @@ func parseAPIVersion(apiVersion string) (group, version string) {
 
 // ListReports lists all reports with pagination to handle large datasets (like SBOM)
 func (c *Client) ListReports(ctx context.Context, reportType config.ReportKind, namespace string) ([]unstructured.Unstructured, error) {
-	if c.restricted {
-		if !reportType.Namespaced || !c.CanReadNamespace(namespace) {
-			return nil, nil
-		}
-	}
-
 	if namespace != "" && !reportType.Namespaced {
 		return nil, nil
 	}
@@ -318,8 +295,8 @@ func (c *Client) GetReportsByType(ctx context.Context, reportType config.ReportK
 }
 
 func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportKind, namespace, name string) (*Report, error) {
-	if c.restricted && (!reportType.Namespaced || !c.CanReadNamespace(namespace)) {
-		return nil, fmt.Errorf("namespace access denied")
+	if !reportType.Namespaced && namespace != "" {
+		return nil, fmt.Errorf("cluster-scoped report cannot specify namespace")
 	}
 	group, version := parseAPIVersion(reportType.APIVersion)
 
@@ -329,7 +306,15 @@ func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportK
 		Resource: reportType.Name,
 	}
 
-	report, err := c.dynamic.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	var (
+		report *unstructured.Unstructured
+		err    error
+	)
+	if reportType.Namespaced {
+		report, err = c.dynamic.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	} else {
+		report, err = c.dynamic.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get report from Kubernetes: %v", err)
 	}
@@ -360,18 +345,6 @@ func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportK
 		Status:          status,
 		Data:            report.Object,
 	}, nil
-}
-
-func (c *Client) CanReadNamespace(namespace string) bool {
-	if !c.restricted {
-		return true
-	}
-	for _, allowed := range c.namespaces {
-		if allowed == namespace {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Client) GetReports(ctx context.Context, namespace string) ([]Report, error) {

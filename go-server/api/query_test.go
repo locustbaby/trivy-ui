@@ -5,10 +5,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"trivy-ui/auth"
 )
 
 type stubCacheService struct {
 	reports map[string][]Report
+	trends  []TrendRecord
 }
 
 func (s *stubCacheService) Get(key string) (interface{}, bool)                 { return nil, false }
@@ -19,8 +22,10 @@ func (s *stubCacheService) Delete(key string)                                  {
 func (s *stubCacheService) DeleteReportEntry(_, _, _, _ string)                {}
 func (s *stubCacheService) GetReportCount(_, _ string) (int, int)              { return 0, 0 }
 func (s *stubCacheService) GetOverviewData(_ string) *ClusterOverview          { return nil }
-func (s *stubCacheService) GetTrends(_ string, _ int) []TrendRecord            { return nil }
-func (s *stubCacheService) GetStats() map[string]interface{}                   { return nil }
+func (s *stubCacheService) GetTrends(_ string, _ int) []TrendRecord {
+	return append([]TrendRecord(nil), s.trends...)
+}
+func (s *stubCacheService) GetStats() map[string]interface{} { return nil }
 func (s *stubCacheService) GetReports(typeName, clusterFilter string, namespaceFilters []string) []Report {
 	return s.GetRawReportsByType(typeName, clusterFilter, namespaceFilters)
 }
@@ -200,6 +205,32 @@ func newQuerySvc(reports []Report, typeName string) QueryService {
 	return NewQueryService(stub)
 }
 
+func TestListReports_UserScopeExcludesClusterScopedAndOtherNamespaces(t *testing.T) {
+	stub := &stubCacheService{reports: map[string][]Report{
+		"vulnerabilityreports": {
+			makeReport("allowed", "cluster-a", "team-a", "vulnerabilityreports", 1),
+			makeReport("forbidden", "cluster-a", "team-b", "vulnerabilityreports", 1),
+		},
+		"clustervulnerabilityreports": {
+			makeReport("cluster-report", "cluster-a", "", "clustervulnerabilityreports", 1),
+		},
+	}}
+	svc := NewQueryService(stub)
+	access := auth.NewAccessSnapshot(
+		auth.UnrestrictedScope(),
+		auth.NewScopeSnapshot([]auth.ScopeRule{{Cluster: "cluster-a", Namespaces: []string{"team-a"}}}),
+	)
+
+	result := svc.ListReports(ReportQuery{Type: "vulnerabilityreports", Page: 1, PageSize: 50, Access: access})
+	if result.Total != 1 || len(result.Items) != 1 || result.Items[0].Name != "allowed" {
+		t.Fatalf("restricted query returned total=%d items=%v", result.Total, result.Items)
+	}
+	clusterResult := svc.ListReports(ReportQuery{Type: "clustervulnerabilityreports", Page: 1, PageSize: 50, Access: access})
+	if clusterResult.Total != 0 || len(clusterResult.Items) != 0 {
+		t.Fatalf("restricted query returned cluster-scoped reports: %+v", clusterResult)
+	}
+}
+
 func TestListReports_All(t *testing.T) {
 	reports := []Report{
 		makeReport("r1", "c", "ns", "vuln", 0),
@@ -298,5 +329,44 @@ func TestRefIndexCacheKey_NormalizesNamespaces(t *testing.T) {
 	q2 := ReportQuery{Type: "vuln", Namespaces: []string{"ns-a", "ns-b"}}
 	if refIndexCacheKey(q1, 7) != refIndexCacheKey(q2, 7) {
 		t.Fatal("equivalent namespace filters should share a cache key")
+	}
+}
+
+func TestGetTrendsForScope_AggregatesAuthorizedFleetAndClusterReports(t *testing.T) {
+	bucket := time.Now().UTC().Truncate(time.Hour)
+	cache := &stubCacheService{trends: []TrendRecord{
+		{Timestamp: bucket, Critical: 100},
+		{Timestamp: bucket, Cluster: "prod", Critical: 100},
+		{Timestamp: bucket, Cluster: "prod", Namespace: "team-a", Critical: 2, High: 3},
+		{Timestamp: bucket, Cluster: "prod", Namespace: "team-b", Critical: 50},
+		{Timestamp: bucket, Cluster: "prod", Namespace: auth.ClusterScopedNamespace, Critical: 7, High: 11},
+	}}
+	h := NewHandler(nil, cache, nil, NewQueryService(cache), nil, nil, nil)
+	scope := auth.NewAccessSnapshot(
+		auth.NewScopeSnapshot([]auth.ScopeRule{{Cluster: "prod", Namespaces: []string{"team-a", auth.ClusterScopedNamespace}}}),
+		auth.UnrestrictedScope(),
+	)
+
+	got := h.getTrendsForScope("", 30, scope)
+	if len(got) != 2 {
+		t.Fatalf("got %d trends, want fleet and prod aggregates: %+v", len(got), got)
+	}
+	byCluster := make(map[string]TrendRecord, len(got))
+	for _, trend := range got {
+		byCluster[trend.Cluster] = trend
+	}
+	for _, cluster := range []string{"", "prod"} {
+		trend, ok := byCluster[cluster]
+		if !ok {
+			t.Fatalf("missing %q aggregate in %+v", cluster, got)
+		}
+		if trend.Critical != 9 || trend.High != 14 || trend.Namespace != "" {
+			t.Errorf("%q aggregate = %+v, want critical=9 high=14 without namespace", cluster, trend)
+		}
+	}
+
+	clusterOnly := h.getTrendsForScope("prod", 30, scope)
+	if len(clusterOnly) != 1 || clusterOnly[0].Cluster != "prod" || clusterOnly[0].Critical != 9 || clusterOnly[0].High != 14 {
+		t.Fatalf("cluster trend = %+v, want one prod aggregate with authorized totals", clusterOnly)
 	}
 }

@@ -23,6 +23,7 @@ type CookieSessionManager struct {
 	secret   []byte
 	duration time.Duration
 	secure   bool
+	sameSite http.SameSite
 }
 
 type sessionPayload struct {
@@ -30,14 +31,21 @@ type sessionPayload struct {
 	Expiry  int64  `json:"exp"`
 }
 
-func NewCookieSessionManager(secret []byte, duration time.Duration, secure bool) (*CookieSessionManager, error) {
+func NewCookieSessionManager(secret []byte, duration time.Duration, secure bool, sameSite string) (*CookieSessionManager, error) {
 	if len(secret) < 32 {
 		return nil, fmt.Errorf("session secret must be at least 32 bytes")
 	}
 	if duration <= 0 {
 		return nil, fmt.Errorf("session duration must be positive")
 	}
-	return &CookieSessionManager{secret: append([]byte(nil), secret...), duration: duration, secure: secure}, nil
+	policy, err := parseSameSite(sameSite)
+	if err != nil {
+		return nil, err
+	}
+	if policy == http.SameSiteNoneMode && !secure {
+		return nil, fmt.Errorf("SameSite=None requires secure cookies")
+	}
+	return &CookieSessionManager{secret: append([]byte(nil), secret...), duration: duration, secure: secure, sameSite: policy}, nil
 }
 
 func (m *CookieSessionManager) Create(w http.ResponseWriter, principal Principal) error {
@@ -56,7 +64,7 @@ func (m *CookieSessionManager) Create(w http.ResponseWriter, principal Principal
 		MaxAge:   int(m.duration.Seconds()),
 		HttpOnly: true,
 		Secure:   m.secure,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: m.sameSite,
 	})
 	return nil
 }
@@ -87,7 +95,20 @@ func (m *CookieSessionManager) Read(r *http.Request) (Session, error) {
 }
 
 func (m *CookieSessionManager) Clear(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0), HttpOnly: true, Secure: m.secure, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0), HttpOnly: true, Secure: m.secure, SameSite: m.sameSite})
+}
+
+func parseSameSite(value string) (http.SameSite, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "lax":
+		return http.SameSiteLaxMode, nil
+	case "strict":
+		return http.SameSiteStrictMode, nil
+	case "none":
+		return http.SameSiteNoneMode, nil
+	default:
+		return 0, fmt.Errorf("unsupported cookie SameSite policy %q (supported: lax, strict, none)", value)
+	}
 }
 
 func (m *CookieSessionManager) sign(raw []byte) string {

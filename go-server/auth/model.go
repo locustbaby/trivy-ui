@@ -54,6 +54,27 @@ func (a AccessSnapshot) CanReadCluster(cluster string) bool {
 	return false
 }
 
+func (a AccessSnapshot) CanReadReportType(cluster string, namespaced bool) bool {
+	if !namespaced {
+		return a.CanRead(cluster, ClusterScopedNamespace)
+	}
+	for _, userRule := range a.User.Rules {
+		for _, sourceRule := range a.Source.Rules {
+			if !scopeClusterMatches(userRule.Cluster, cluster) || !scopeClusterMatches(sourceRule.Cluster, cluster) {
+				continue
+			}
+			for _, userNamespace := range userRule.Namespaces {
+				for _, sourceNamespace := range sourceRule.Namespaces {
+					if userNamespace != ClusterScopedNamespace && sourceNamespace != ClusterScopedNamespace && namespacesOverlap(userNamespace, sourceNamespace) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (a AccessSnapshot) IsUnrestricted() bool {
 	return a.User.IsUnrestricted() && a.Source.IsUnrestricted()
 }

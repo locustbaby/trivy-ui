@@ -28,17 +28,14 @@ type CacheUpdater interface {
 }
 
 type ReportInformerManager struct {
-	mu              sync.RWMutex
-	client          *Client
-	informers       map[string]cache.SharedInformer
-	clusterName     string
-	ctx             context.Context
-	cancel          context.CancelFunc
-	cacheUpdater    CacheUpdater
-	registry        *config.CRDRegistry
-	namespaces      []string
-	restricted      bool
-	maxWatchStreams int
+	mu           sync.RWMutex
+	client       *Client
+	informers    map[string]cache.SharedInformer
+	clusterName  string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	cacheUpdater CacheUpdater
+	registry     *config.CRDRegistry
 }
 
 func NewReportInformerManager(client *Client, clusterName string, cacheUpdater CacheUpdater) *ReportInformerManager {
@@ -48,16 +45,13 @@ func NewReportInformerManager(client *Client, clusterName string, cacheUpdater C
 func NewReportInformerManagerWithRegistry(client *Client, clusterName string, cacheUpdater CacheUpdater, registry *config.CRDRegistry) *ReportInformerManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ReportInformerManager{
-		client:          client,
-		informers:       make(map[string]cache.SharedInformer),
-		clusterName:     clusterName,
-		ctx:             ctx,
-		cancel:          cancel,
-		cacheUpdater:    cacheUpdater,
-		registry:        registry,
-		namespaces:      append([]string(nil), client.namespaces...),
-		restricted:      client.restricted,
-		maxWatchStreams: client.maxWatchStreams,
+		client:       client,
+		informers:    make(map[string]cache.SharedInformer),
+		clusterName:  clusterName,
+		ctx:          ctx,
+		cancel:       cancel,
+		cacheUpdater: cacheUpdater,
+		registry:     registry,
 	}
 }
 
@@ -67,17 +61,6 @@ func (m *ReportInformerManager) Start() error {
 
 	if len(reports) == 0 {
 		return fmt.Errorf("no report types discovered")
-	}
-	if m.restricted && m.maxWatchStreams > 0 {
-		watchCount := 0
-		for _, reportType := range reports {
-			if reportType.Namespaced {
-				watchCount += len(m.namespaces)
-			}
-		}
-		if watchCount > m.maxWatchStreams {
-			return fmt.Errorf("estimated namespace watch streams %d exceed limit %d", watchCount, m.maxWatchStreams)
-		}
 	}
 
 	m.mu.Lock()
@@ -92,7 +75,7 @@ func (m *ReportInformerManager) Start() error {
 	resyncPeriod := 10 * time.Minute
 
 	for _, reportType := range reports {
-		reportType := reportType // Create local copy to avoid closure capture issue
+		reportType := reportType
 		group, version := parseAPIVersion(reportType.APIVersion)
 		gvr := schema.GroupVersionResource{
 			Group:    group,
@@ -100,37 +83,24 @@ func (m *ReportInformerManager) Start() error {
 			Resource: reportType.Name,
 		}
 
-		namespaces := []string{metav1.NamespaceAll}
-		if m.restricted {
-			if !reportType.Namespaced {
-				continue
-			}
-			namespaces = m.namespaces
+		if _, exists := m.informers[reportType.Name]; exists {
+			continue
 		}
-		for _, namespace := range namespaces {
-			key := reportType.Name
-			if m.restricted {
-				key = namespace + "\x00" + reportType.Name
-			}
-			if _, exists := m.informers[key]; exists {
-				continue
-			}
-			factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(m.client.dynamic, resyncPeriod, namespace, nil)
-			informer := factory.ForResource(gvr).Informer()
-			if err := informer.SetTransform(stripLargeFields); err != nil {
-				utils.LogWarning("Failed to set transform on informer", map[string]interface{}{"reportType": reportType.Name, "namespace": namespace, "error": err.Error()})
-			}
-			informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-				AddFunc:    func(obj interface{}) { m.onAdd(reportType, obj) },
-				UpdateFunc: func(oldObj, newObj interface{}) { m.onUpdate(reportType, oldObj, newObj) },
-				DeleteFunc: func(obj interface{}) { m.onDelete(reportType, obj) },
-			})
-			informer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
-				utils.LogWarning("Informer watch error, will retry", map[string]interface{}{"cluster": m.clusterName, "reportType": reportType.Name, "namespace": namespace, "error": err.Error()})
-			})
-			m.informers[key] = informer
-			factory.Start(m.ctx.Done())
+		factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(m.client.dynamic, resyncPeriod, metav1.NamespaceAll, nil)
+		informer := factory.ForResource(gvr).Informer()
+		if err := informer.SetTransform(stripLargeFields); err != nil {
+			utils.LogWarning("Failed to set transform on informer", map[string]interface{}{"reportType": reportType.Name, "error": err.Error()})
 		}
+		informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    func(obj interface{}) { m.onAdd(reportType, obj) },
+			UpdateFunc: func(oldObj, newObj interface{}) { m.onUpdate(reportType, oldObj, newObj) },
+			DeleteFunc: func(obj interface{}) { m.onDelete(reportType, obj) },
+		})
+		informer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
+			utils.LogWarning("Informer watch error, will retry", map[string]interface{}{"cluster": m.clusterName, "reportType": reportType.Name, "error": err.Error()})
+		})
+		m.informers[reportType.Name] = informer
+		factory.Start(m.ctx.Done())
 	}
 
 	syncTimeout := 2 * time.Minute
