@@ -316,7 +316,7 @@ func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportK
 		report, err = c.dynamic.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get report from Kubernetes: %v", err)
+		return nil, fmt.Errorf("failed to get report from Kubernetes: %w", err)
 	}
 
 	status := "Unknown"

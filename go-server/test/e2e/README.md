@@ -29,7 +29,7 @@ asserts:
 - **Filters**: namespace (single/multi/spaced), `onlyVulnerable` and search are
   validated against expectations computed from the seeded CRs.
 - **Error matrix**: unknown report type → `400 VALIDATION_FAILED`, unknown
-  cluster → `403 ACCESS_DENIED`, nonexistent report → `503 PROVIDER_UNAVAILABLE`, missing type param
+  cluster → `403 ACCESS_DENIED`, nonexistent report → `404 REPORT_NOT_FOUND`, missing type param
   → `400 VALIDATION_FAILED`, invalid paging params degrade to safe defaults.
 - **Live updates**: creating a CR via the dynamic client makes it appear
   through the informer watch within seconds; deleting it removes it.

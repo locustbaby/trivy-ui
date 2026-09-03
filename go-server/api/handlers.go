@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"trivy-ui/auth"
 	"trivy-ui/config"
 	"trivy-ui/dataaccess"
@@ -976,6 +978,10 @@ func (h *Handler) getReportDetails(w http.ResponseWriter, r *http.Request, clust
 	})
 	if err != nil {
 		if r.Context().Err() == context.Canceled {
+			return
+		}
+		if apierrors.IsNotFound(err) {
+			writeError(w, r, http.StatusNotFound, ErrReportNotFound, "Report not found")
 			return
 		}
 		utils.LogWarning("Failed to fetch report from Kubernetes", map[string]interface{}{

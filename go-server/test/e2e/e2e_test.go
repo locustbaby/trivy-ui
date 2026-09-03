@@ -715,10 +715,10 @@ func TestErrorMatrix(t *testing.T) {
 		t.Errorf("unknown cluster: status=%d error=%+v, want 403 ACCESS_DENIED", status, env.Error)
 	}
 
-	// Detail of a nonexistent report in a real cluster -> 503 PROVIDER_UNAVAILABLE.
+	// Detail of a nonexistent report in a real cluster -> 404 REPORT_NOT_FOUND.
 	status, env = apiGet(t, fmt.Sprintf("/api/v1/reports/%s/vulnerabilityreports/team-a/definitely-not-here", gt.clusterName))
-	if status != http.StatusServiceUnavailable || env.Error == nil {
-		t.Errorf("missing report: status=%d error=%+v, want 503 with error envelope", status, env.Error)
+	if status != http.StatusNotFound || env.Error == nil || env.Error.Type != "REPORT_NOT_FOUND" {
+		t.Errorf("missing report: status=%d error=%+v, want 404 REPORT_NOT_FOUND", status, env.Error)
 	}
 
 	// Invalid paging params degrade to defaults instead of erroring/breaking.

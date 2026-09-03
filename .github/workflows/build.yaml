@@ -56,13 +56,28 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
 
-      - name: Run Go tests
+      - name: Run Go tests with coverage & race detection
         working-directory: go-server
-        run: go test ./...
+        run: |
+          go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
-      - name: Run Go race tests
+      - name: Generate Go coverage summary
         working-directory: go-server
-        run: go test -race ./...
+        run: |
+          echo "### 📊 Go Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | Coverage |" >> $GITHUB_STEP_SUMMARY
+          echo "|:---|:---:|" >> $GITHUB_STEP_SUMMARY
+          go test -cover ./... | awk '{print "| `" $2 "` | `" $4 "` |"}' >> $GITHUB_STEP_SUMMARY
+          TOTAL_COV=$(go tool cover -func=coverage.out | tail -n 1 | awk '{print $3}')
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔥 **Total Statement Coverage:** \`$TOTAL_COV\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage-report
+          path: go-server/coverage.out
+          retention-days: 14
 
       - name: Run Go vet
         working-directory: go-server
@@ -72,11 +87,18 @@ jobs:
         working-directory: go-server
         run: test -z "$(gofmt -l .)"
 
+      - name: Run govulncheck (Go vulnerability scanner)
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go-server/go.mod
+          work-dir: go-server
+
       - name: Run frontend checks
         working-directory: trivy-dashboard
         run: |
           npm ci
           npm run lint
+          npm audit --audit-level=high || true
           npm run build
 
       - name: Validate Helm chart
