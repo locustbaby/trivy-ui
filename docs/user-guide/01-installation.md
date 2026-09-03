@@ -116,3 +116,53 @@ docker run -d \
 - Open `http://localhost:8080` in your browser.
 - To enable authentication with Docker, see [Authentication and access control](02-authentication-and-access-control.md#4-run-with-docker-standalone).
 
+## Environment variable reference
+
+| Variable | Description | Default |
+|---|---|---|
+| `PORT` | HTTP listening port | `8080` |
+| `LOG_LEVEL` | Logging level (`debug`, `info`, `warning`, `error`) | `info` |
+| `STATIC_PATH` | Path to frontend assets directory | `trivy-dashboard/dist` |
+| `KUBECONFIG_DIR` | Directory containing kubeconfig files | `/kubeconfigs` |
+| `DATA_PATH` | Directory for cache snapshot persistence | `/tmp/trivy-ui-data` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins for cross-origin setups | _(unset)_ |
+| `AUTH_COOKIE_SAME_SITE` | Session-cookie policy: `lax`, `strict`, or `none` | `lax` |
+| `ERROR_PAGE_CONFIG` | Structured JSON for support page shown on access/availability errors | _(unset)_ |
+| `ERROR_PAGE_FILE` | Path to operator-provided custom HTML file served at `/error-page.html` | _(unset)_ |
+
+## Custom error page
+
+Operators can provide customized branding or contact instructions when an error or access restriction occurs.
+
+### Structured Helm values (Recommended)
+Configure `customErrorPage` directly in Helm `values.yaml` without needing custom HTML:
+
+```yaml
+customErrorPage:
+  enabled: true
+  title: "Security dashboard unavailable"
+  message: "Contact the platform team for help:"
+  items:
+    - type: email
+      label: Email
+      value: sec-platform@example.com
+    - type: link
+      label: On-call chat
+      value: https://chat.example.com/platform-oncall
+    - type: link
+      label: Runbook
+      value: https://wiki.example.com/trivy-ui/runbook
+```
+
+### Static HTML file escape hatch
+To provide an entirely custom HTML page, mount an HTML file and set `ERROR_PAGE_FILE`:
+
+```bash
+docker run -d \
+  -v /path/to/error-page.html:/app/error-page.html:ro \
+  -e ERROR_PAGE_FILE=/app/error-page.html \
+  -p 8080:8080 \
+  locustbaby/trivy-ui:v0.0.5
+```
+
+

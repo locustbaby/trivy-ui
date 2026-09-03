@@ -22,6 +22,16 @@ export function MultiCombobox({
   const [inputValue, setInputValue] = React.useState("")
   const [filteredOptions, setFilteredOptions] = React.useState(options)
   const containerRef = React.useRef<HTMLDivElement>(null)
+  const searchInputRef = React.useRef<HTMLInputElement>(null)
+
+  React.useEffect(() => {
+    if (open) {
+      const timer = setTimeout(() => {
+        searchInputRef.current?.focus()
+      }, 0)
+      return () => clearTimeout(timer)
+    }
+  }, [open])
 
   React.useEffect(() => {
     if (inputValue === "") {
@@ -120,6 +130,8 @@ export function MultiCombobox({
       {open && (
         <div className="absolute z-50 mt-1 w-full rounded-md border bg-card p-1 shadow-md">
           <input
+            ref={searchInputRef}
+            autoFocus
             type="text"
             className="w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
             placeholder="Search..."

@@ -8,6 +8,8 @@
 - [Multi-cluster collection](user-guide/03-multi-cluster-collection.md)
 - [Dashboard features and navigation](user-guide/05-dashboard-features-and-navigation.md)
 - [Operations and troubleshooting](user-guide/04-operations-and-troubleshooting.md)
+- [API reference and error codes](user-guide/06-api-reference.md)
+
 
 
 ## Project documentation

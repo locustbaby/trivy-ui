@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Build frontend
 cd "$SCRIPT_DIR/trivy-dashboard"
-echo "Building Vue frontend..."
+echo "Building frontend..."
 npm run build
 
 # Start backend server

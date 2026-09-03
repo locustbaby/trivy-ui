@@ -34,6 +34,7 @@ belong in `auth.yaml` scopes.
 | 🌐 [**03. Multi-Cluster Collection**](03-multi-cluster-collection.md) | Multi-cluster kubeconfig secrets, Fleet Hub cross-cluster overview, and cluster switching |
 | 🛠️ [**04. Operations & Troubleshooting**](04-operations-and-troubleshooting.md) | 401 Unauthorized troubleshooting, network connectivity, proxy routing, and access logs |
 | 📊 [**05. Dashboard Features & Navigation**](05-dashboard-features-and-navigation.md) | Resizable sidebar, Aqua semantic icons, 30-day trends, report filtering, and detail drawers |
+| 🔌 [**06. API Reference & Error Codes**](06-api-reference.md) | REST API endpoints, query filters, JSON error schema, and cURL examples |
 
 ## Recommended reading order
 
@@ -42,5 +43,7 @@ belong in `auth.yaml` scopes.
 3. Connect multiple clusters and explore Fleet Hub with [Multi-cluster collection](03-multi-cluster-collection.md).
 4. Learn the UI workflows in [Dashboard features and navigation](05-dashboard-features-and-navigation.md).
 5. Refer to [Operations and troubleshooting](04-operations-and-troubleshooting.md) when maintaining the deployment or diagnosing issues.
+6. Integrate external automation with [API Reference & Error Codes](06-api-reference.md).
+
 
 
