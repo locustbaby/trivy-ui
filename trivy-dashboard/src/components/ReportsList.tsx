@@ -4,7 +4,8 @@ import { useSearchParams } from "react-router-dom"
 import { api, CLUSTER_SCOPED_NAMESPACE, type Report, type ReportType } from "../api/client"
 import { Button } from "./ui/button"
 import { MultiCombobox } from "./ui/multi-combobox"
-import { Search, Loader2, ArrowUp, Share2, Check, Shield, AlertTriangle, X } from "lucide-react"
+import { Search, Loader2, ArrowUp, Share2, Check, Shield, AlertTriangle, X, ChevronRight, CheckCircle2 } from "lucide-react"
+import { cn } from "@/lib/utils"
 
 interface ReportsListProps {
   typeName: string
@@ -18,6 +19,20 @@ interface ReportsListProps {
 const PAGE_SIZE = 50
 const AUTO_REFRESH_INTERVAL = 15000
 const reportIdentity = (report: Report) => JSON.stringify([report.cluster, report.namespace, report.type, report.name])
+
+function extractWorkloadKind(name: string): string | null {
+  const lower = name.toLowerCase()
+  if (lower.startsWith("service-")) return "Service"
+  if (lower.startsWith("replicaset-")) return "ReplicaSet"
+  if (lower.startsWith("deployment-")) return "Deployment"
+  if (lower.startsWith("daemonset-")) return "DaemonSet"
+  if (lower.startsWith("statefulset-")) return "StatefulSet"
+  if (lower.startsWith("cronjob-")) return "CronJob"
+  if (lower.startsWith("job-")) return "Job"
+  if (lower.startsWith("pod-")) return "Pod"
+  if (lower.startsWith("role-") || lower.startsWith("clusterrole-")) return "RBAC"
+  return null
+}
 
 function ReportsListInternal({
   typeName,
@@ -649,22 +664,23 @@ function ReportsListInternal({
         <div className="flex items-stretch sm:items-end gap-2">
           <Button
             onClick={() => handleShowAllChange(!urlShowAll)}
-            variant={urlShowAll ? "outline" : "default"}
+            variant={urlShowAll ? "outline" : "secondary"}
             size="sm"
-            className="h-11 px-4 gap-2 flex-1 sm:flex-initial"
-            title={urlShowAll ? "Show only vulnerable" : "Show all reports"}
+            className={cn(
+              "h-11 px-3.5 gap-2 flex-1 sm:flex-initial text-xs font-medium transition-all",
+              !urlShowAll && "bg-amber-500/10 text-amber-700 border-amber-500/30 hover:bg-amber-500/20 dark:text-amber-400"
+            )}
+            title={urlShowAll ? "Show only reports with issues" : "Show all reports"}
           >
             {urlShowAll ? (
               <>
-                <Shield className="h-4 w-4" />
-                <span className="hidden sm:inline">All</span>
-                <span className="sm:hidden">All</span>
+                <Shield className="h-4 w-4 text-muted-foreground" />
+                <span>All</span>
               </>
             ) : (
               <>
-                <AlertTriangle className="h-4 w-4" />
-                <span className="hidden sm:inline">Vulnerable</span>
-                <span className="sm:hidden">Vuln</span>
+                <AlertTriangle className="h-4 w-4 text-amber-500" />
+                <span>Issues only</span>
               </>
             )}
           </Button>
@@ -689,6 +705,7 @@ function ReportsListInternal({
               const reportId = reportIdentity(report)
               const counts = getSummaryCounts(report)
               const hasSeverity = counts && (counts.critical > 0 || counts.high > 0 || counts.medium > 0 || counts.low > 0)
+              const workloadKind = extractWorkloadKind(report.name)
 
               return (
                 <div
@@ -696,37 +713,51 @@ function ReportsListInternal({
                   className="group relative rounded-xl border bg-card p-4 transition-all duration-200 hover:shadow-lg hover:border-primary/30 hover:-translate-y-0.5 cursor-pointer"
                   onClick={() => onSelectReport(report)}
                 >
-                  <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-center justify-between gap-4">
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3 mb-2">
+                      <div className="flex items-center gap-2.5 mb-2 flex-wrap">
+                        {workloadKind && (
+                          <span className="text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded bg-muted text-muted-foreground border">
+                            {workloadKind}
+                          </span>
+                        )}
                         <span className="font-semibold text-base truncate">{report.name}</span>
-                        {hasSeverity && (
+                        {hasSeverity ? (
                           <div className="flex items-center gap-1.5">
                             {counts.critical > 0 && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-950/50 text-red-700 dark:text-red-400 text-xs font-medium">
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-red-100 dark:bg-red-950/50 text-red-700 dark:text-red-400 text-xs font-medium" title={`${counts.critical} Critical`}>
                                 <span className="w-1.5 h-1.5 rounded-full bg-red-500 severity-pulse" />
-                                {counts.critical}
+                                <span>{counts.critical}</span>
+                                <span className="text-[9px] font-bold opacity-75">CRIT</span>
                               </span>
                             )}
                             {counts.high > 0 && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 dark:bg-orange-950/50 text-orange-700 dark:text-orange-400 text-xs font-medium">
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-orange-100 dark:bg-orange-950/50 text-orange-700 dark:text-orange-400 text-xs font-medium" title={`${counts.high} High`}>
                                 <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-                                {counts.high}
+                                <span>{counts.high}</span>
+                                <span className="text-[9px] font-bold opacity-75">HIGH</span>
                               </span>
                             )}
                             {counts.medium > 0 && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-950/50 text-yellow-700 dark:text-yellow-400 text-xs font-medium">
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-950/50 text-yellow-700 dark:text-yellow-400 text-xs font-medium" title={`${counts.medium} Medium`}>
                                 <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
-                                {counts.medium}
+                                <span>{counts.medium}</span>
+                                <span className="text-[9px] font-bold opacity-75">MED</span>
                               </span>
                             )}
                             {counts.low > 0 && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950/50 text-blue-700 dark:text-blue-400 text-xs font-medium">
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950/50 text-blue-700 dark:text-blue-400 text-xs font-medium" title={`${counts.low} Low`}>
                                 <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
-                                {counts.low}
+                                <span>{counts.low}</span>
+                                <span className="text-[9px] font-bold opacity-75">LOW</span>
                               </span>
                             )}
                           </div>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            Clean
+                          </span>
                         )}
                       </div>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
@@ -773,22 +804,26 @@ function ReportsListInternal({
                       </div>
                     </div>
 
-                    {/* Share Button */}
-                    <button
-                      onClick={(e) => copyReportLink(report, e)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground"
-                      title="Copy link to this report"
-                    >
-                      {copiedReportId === reportId ? (
-                        <Check className="h-4 w-4 text-green-500" />
-                      ) : (
-                        <Share2 className="h-4 w-4" />
-                      )}
-                    </button>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {/* Share Button */}
+                      <button
+                        onClick={(e) => copyReportLink(report, e)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground"
+                        title="Copy link to this report"
+                      >
+                        {copiedReportId === reportId ? (
+                          <Check className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <Share2 className="h-4 w-4" />
+                        )}
+                      </button>
+                      <ChevronRight className="h-4 w-4 text-muted-foreground/30 group-hover:text-primary group-hover:translate-x-0.5 transition-all" />
+                    </div>
                   </div>
                 </div>
               )
             })}
+
           </div>
           {hasMore && (
             <div ref={observerTarget} className="flex items-center justify-center py-6">

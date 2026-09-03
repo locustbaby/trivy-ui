@@ -43,10 +43,11 @@ kubectl create secret generic kubeconfigs \
 Then install or upgrade with:
 
 ```bash
-helm upgrade --install trivy-ui trivy-ui/trivy-ui \
+helm upgrade --install trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui \
   --set kubeconfigs.create=false \
   --set kubeconfigs.secretName=kubeconfigs
 ```
+
 
 By default, Trivy UI discovers every kubeconfig context in the configured
 directory. For stable aliases, use `clusterSources`:
@@ -95,3 +96,23 @@ Collection is always cluster-wide. The old `DATA_ACCESS_MODE` and
 `DATA_ACCESS_CLUSTERS` environment variables are no longer supported; remove
 them from custom manifests and values files. User visibility is configured in
 the Dashboard authentication file instead.
+
+## Standalone Docker container
+
+You can also run Trivy UI as a standalone Docker container outside Kubernetes:
+
+```bash
+docker pull locustbaby/trivy-ui:v0.0.5
+
+docker run -d \
+  --name trivy-ui \
+  -v /path/to/kubeconfigs:/kubeconfigs \
+  -e KUBECONFIG_DIR=/kubeconfigs \
+  -p 8080:8080 \
+  locustbaby/trivy-ui:v0.0.5
+```
+
+- Mount the directory containing your kubeconfig file(s) to `/kubeconfigs`.
+- Open `http://localhost:8080` in your browser.
+- To enable authentication with Docker, see [Authentication and access control](02-authentication-and-access-control.md#4-run-with-docker-standalone).
+

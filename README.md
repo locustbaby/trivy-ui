@@ -8,18 +8,24 @@ Trivy UI provides a centralized dashboard for viewing vulnerability reports gene
 ## Screenshots
 
 ### Fleet Hub
-![Fleet Hub](./docs/global-overview.png)
+![Fleet Hub](./docs/images/user-guide/fleet-hub.png)
 
 ### Cluster Overview
-![Cluster Overview](./docs/cluster-overivew.png)
+![Cluster Overview](./docs/images/user-guide/cluster-overview.png)
 
 ### Reports Dashboard
-![Dashboard Overview](./docs/dashboard.png)
+![Dashboard Overview](./docs/images/user-guide/reports-dashboard.png)
 
 ### Report Details
-![Report Details](./docs/details.png)
+![Report Details](./docs/images/user-guide/report-details.png)
+
+### Web UI Login
+![Web UI Login](./docs/images/user-guide/login.png)
 
 ---
+
+
+
 
 ## Quick Start with Docker Image
 
@@ -67,28 +73,120 @@ helm install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui \
   --set ingress.hosts[0].host=trivy-ui.example.com
 ```
 
-For detailed Helm chart documentation, see [charts/trivy-ui/README.md](charts/trivy-ui/README.md).
-For the user-oriented installation, authentication, and access-control guide,
-see [docs/README.md](docs/README.md).
+---
+
+## Authentication & Access Control (RBAC)
+
+Trivy UI supports file-backed authentication with fine-grained role-based access control (RBAC) across clusters, namespaces, and cluster-scoped reports.
+
+### 1. Generate Password Hash
+
+```bash
+# Using go
+cd go-server && go run . hash-password
+
+# Or using Docker
+docker run -it --rm locustbaby/trivy-ui:v0.0.5 hash-password
+```
+
+### 2. Configure `auth.yaml`
+
+```yaml
+version: v1
+users:
+  admin:
+    passwordHash: "$2a$12$REPLACE_WITH_YOUR_BCRYPT_HASH"
+    scopes:
+      - cluster: "*"
+        namespaces:
+          - "*" # All Namespaced reports
+          - _   # All Cluster-scoped reports (e.g. ClusterCompliance, ClusterConfigAudit)
+  developer:
+    passwordHash: "$2a$12$REPLACE_WITH_YOUR_BCRYPT_HASH"
+    groups:
+      - dev-team
+groups:
+  dev-team:
+    scopes:
+      - cluster: prod
+        namespaces:
+          - team-a
+```
+
+### 3. Deploy with Authentication
+
+**Kubernetes (Helm)**:
+```bash
+kubectl create secret generic trivy-ui-auth \
+  --from-file=auth.yaml=auth.yaml \
+  --from-literal=session-secret="$(openssl rand -hex 32)"
+
+helm upgrade --install my-trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui \
+  --set auth.mode=local \
+  --set auth.local.existingSecret=trivy-ui-auth
+```
+
+**Docker Standalone**:
+```bash
+docker run -d \
+  -v /path/to/kubeconfigs:/kubeconfigs \
+  -v $(pwd)/auth.yaml:/etc/trivy-ui/auth/auth.yaml:ro \
+  -e KUBECONFIG_DIR=/kubeconfigs \
+  -e AUTH_MODE=local \
+  -e AUTH_FILE_PATH=/etc/trivy-ui/auth/auth.yaml \
+  -e AUTH_SESSION_SECRET="$(openssl rand -hex 32)" \
+  -e AUTH_COOKIE_SECURE="false" \
+  -p 8080:8080 \
+  locustbaby/trivy-ui:v0.0.5
+```
+
+### 4. Web UI Usage
+
+1. Open `http://localhost:8080` in your browser.
+2. Sign in with your username and password (supports browser password managers, show/hide password, and "Remember username").
+3. Each user's view is strictly isolated according to their assigned scopes (e.g. visiting `http://localhost:8080/?cluster=prod&type=configauditreports&namespace=team-a`). Unauthorized namespace or cluster requests return `403 ACCESS_DENIED`.
+
 
 ---
 
+## Documentation
+
+Full documentation is available in the [User Guide](docs/user-guide/README.md):
+
+| Document | Topic |
+|---|---|
+| 📖 [**01. Installation & Configuration**](docs/user-guide/01-installation.md) | Helm chart deployment, standalone Docker, ingress setup, and resource requirements |
+| 🔐 [**02. Authentication & Access Control**](docs/user-guide/02-authentication-and-access-control.md) | Password hashing, `auth.yaml` scopes, Web UI login experience, and API access |
+| 🌐 [**03. Multi-Cluster Collection**](docs/user-guide/03-multi-cluster-collection.md) | Multi-cluster kubeconfig secrets, Fleet Hub cross-cluster overview, and cluster switching |
+| 🛠️ [**04. Operations & Troubleshooting**](docs/user-guide/04-operations-and-troubleshooting.md) | 401 Unauthorized troubleshooting, network connectivity, proxy routing, and access logs |
+| 📊 [**05. Dashboard Features & Navigation**](docs/user-guide/05-dashboard-features-and-navigation.md) | Resizable sidebar, Aqua semantic icons, 30-day trends, report filtering, and detail drawers |
+
+For Helm chart parameters, see [charts/trivy-ui/README.md](charts/trivy-ui/README.md).
+
+---
+
+
+
 ## Features
-- **Multi-Cluster Support**: View reports from multiple Kubernetes clusters via kubeconfig directory
+- **Multi-Cluster Support**: View reports from multiple Kubernetes clusters via kubeconfig directory or auto-discovery
 - **Fleet Hub**: Start with a cross-cluster overview page when multiple clusters are available
-- **Cluster Overview**: Drill into per-cluster severity trends, scan breakdowns, and vulnerable workloads
+- **Cluster Overview**: Drill into per-cluster severity trends, scan breakdowns, and vulnerable workloads with equal-height symmetrical layouts
 - **All Trivy CRD Types**: Auto-discovers all Trivy Operator CRDs (VulnerabilityReport, ConfigAuditReport, SbomReport, ExposedSecretReport, RbacAssessmentReport, InfraAssessmentReport, and their cluster-scoped variants)
+- **Modern Resizable Sidebar**: Draggable sidebar width (220px–480px, double-click reset, localStorage persistence) with Aqua Security semantic iconography and inline type search
+- **Workload & Security Badges**: Automatic workload kind tagging (`[Service]`, `[ReplicaSet]`, `[Deployment]`, etc.) with compact severity level counters and clean state indicators
+- **Authentication & RBAC**: Fine-grained user and group scope isolation across clusters, namespaces, and cluster-scoped reports with secure bcrypt hashing and anti-timing protections
+- **Native Login Experience**: Browser password manager autofill support, password show/hide visibility toggle, and "Remember username"
 - **Namespace Selector**: Multi-select namespace filtering with URL persistence
-- **Vulnerability Filter**: Toggle to show only reports with vulnerabilities
+- **Vulnerability Filter**: Concise toggle to switch between all reports and issues only
 - **Shareable Links**: Share filtered views and report details via URL
-- **Quick Copy**: One-click copy for CVE IDs, package names, versions, image references, and more
+- **Quick Copy**: One-click copy for CVE IDs, package names, versions, image references, and cluster/namespace metadata
 - **Server-Side Pagination**: Efficient handling of large clusters with hundreds of reports
 - **Search & Filter**: Filter by cluster, namespace, and search by report name
 - **Detail View**: Full vulnerability/check details fetched on-demand
 - **Disk-Persistent Cache**: Fast startup with cached data, background K8s sync
-- **Real-time Updates**: Kubernetes informer-based watch for live report changes
+- **Real-time Updates**: Kubernetes informer-based watch for live report changes with background-tab polling pauses
 - **Memory Optimized**: SetTransform strips large fields from informer store, detail data fetched on-demand
-- **Responsive Design**: Works on desktop and mobile
+- **Responsive Design**: Works on desktop and mobile with smooth Dark and Light themes
 
 ## Architecture
 

@@ -48,3 +48,5 @@ go-server/.gocache/
 .askpass.sh
 .remaining.txt
 kind-kubeconfig-*.yaml
+auth.yaml
+.deploy-now.yaml

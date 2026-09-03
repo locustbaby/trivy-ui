@@ -5,9 +5,10 @@
 Upgrade the chart and keep the authentication Secret unchanged:
 
 ```bash
-helm upgrade trivy-ui trivy-ui/trivy-ui \
+helm upgrade trivy-ui oci://registry-1.docker.io/locustbaby/trivy-ui \
   --reuse-values
 ```
+
 
 Remove any old `DATA_ACCESS_MODE`, `DATA_ACCESS_CLUSTERS`, or Namespace-mode
 values from deployment manifests before upgrading. The supported model is
@@ -57,6 +58,12 @@ Check that the user's effective scope matches the initialized cluster alias.
 For Cluster-scoped reports, add a namespace entry of `_`; `*` alone only means
 all Namespaced reports.
 
+### Login returns 401 Unauthorized
+
+If credentials were confirmed but login fails:
+1. Confirm that the password matches the hash configured in `auth.yaml`.
+2. Confirm that the `auth.yaml` key and `session-secret` key exist in the mounted Secret.
+
 ### A user receives `ACCESS_DENIED`
 
 The request is outside the user's Dashboard scope or outside the data source
@@ -81,3 +88,4 @@ curl -s 'http://localhost:8080/api/v1/reports?type=vulnerabilityreports&pageSize
 
 When local authentication is enabled, send the session cookie returned by the
 login endpoint with protected API requests.
+

@@ -61,3 +61,29 @@ clusterSources:
 ```
 
 Then use `cluster: prod` in user scopes.
+
+## Multi-cluster Web UI experience
+
+
+
+When more than one cluster is initialized, the Trivy UI Dashboard activates full multi-cluster capabilities:
+
+### 1. Fleet Hub (Cross-Cluster Overview)
+
+![Fleet Hub](../images/user-guide/fleet-hub.png)
+
+When no specific cluster is selected in the URL (root navigation), the Dashboard displays **Fleet Hub**:
+- **Global Vulnerability Trends**: 30-day cross-cluster critical and high severity timeline.
+- **Cluster Directory Cards**: Visual cards for every cluster displaying its sync state (`Fully Synced`), total critical and high counts, and a mini-sparkline trend.
+- **Direct Drill-down**: Clicking any cluster card instantly switches the view to that cluster's dashboard.
+
+
+### 2. Sidebar Cluster Switcher
+A persistent dropdown at the top of the sidebar enables switching between:
+- `🌐 All Clusters` (returns to Fleet Hub)
+- Individual clusters (e.g. `prod`, `staging`, `dev`)
+
+### 3. Cluster Badges on Report Cards
+In multi-cluster environments, report cards in the list view display their origin cluster name (`[prod]`) with a one-click copy button, allowing operators to quickly identify which Kubernetes cluster contains the vulnerable resource.
+
+

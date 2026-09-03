@@ -79,7 +79,8 @@ A polymorphic endpoint returning aggregated metrics. If `cluster` is omitted, it
     "ConfigAuditReport": { "scanned": 50, "failed": 5, "critical": 2 }
   },
   "top_vulnerable_workloads": [
-    { "cluster": "kind-kind", "namespace": "demo-security", "name": "vuln-demo", "type": "VulnerabilityReport", "critical": 8, "high": 12 }
+    { "cluster": "prod-cluster", "namespace": "team-a", "name": "vuln-demo", "type": "VulnerabilityReport", "critical": 8, "high": 12 }
+
   ],
   // Returned when ?cluster= is omitted:
   "vulnerable_clusters": [

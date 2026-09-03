@@ -1,8 +1,27 @@
-import { FileText, Shield, Server, Moon, Sun, Menu, X, ChevronLeft } from "lucide-react"
+import {
+  FileText,
+  Shield,
+  Server,
+  Moon,
+  Sun,
+  Menu,
+  X,
+  ChevronLeft,
+  Bug,
+  ClipboardCheck,
+  KeyRound,
+  Cpu,
+  Users,
+  Boxes,
+  ShieldCheck,
+  LayoutDashboard,
+  GripVertical,
+  Search,
+} from "lucide-react"
 import { cn, formatReportTypeName } from "@/lib/utils"
 import { Combobox } from "./combobox"
 import type { Cluster, ReportType } from "../../api/client"
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect, useMemo, useRef, useCallback } from "react"
 
 export interface SidebarProps {
   clusters: Cluster[]
@@ -15,12 +34,51 @@ export interface SidebarProps {
   onSelectType?: (type: string) => void
 }
 
+const DEFAULT_SIDEBAR_WIDTH = 280
+const MIN_SIDEBAR_WIDTH = 220
+const MAX_SIDEBAR_WIDTH = 480
+const SIDEBAR_WIDTH_KEY = "trivy-ui-sidebar-width"
+
 function getInitialTheme(): boolean {
   if (typeof window === "undefined") return false
   const savedTheme = localStorage.getItem("theme")
   if (savedTheme === "dark") return true
   if (savedTheme === "light") return false
   return window.matchMedia("(prefers-color-scheme: dark)").matches
+}
+
+function getInitialWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_SIDEBAR_WIDTH
+  const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY)
+  const parsed = saved ? parseInt(saved, 10) : NaN
+  return !isNaN(parsed) && parsed >= MIN_SIDEBAR_WIDTH && parsed <= MAX_SIDEBAR_WIDTH
+    ? parsed
+    : DEFAULT_SIDEBAR_WIDTH
+}
+
+function getReportTypeIcon(kindOrName: string) {
+  const lower = kindOrName.toLowerCase()
+  if (lower.includes("vulnerab")) return Bug
+  if (lower.includes("config")) return ClipboardCheck
+  if (lower.includes("secret")) return KeyRound
+  if (lower.includes("infra")) return Cpu
+  if (lower.includes("rbac")) return Users
+  if (lower.includes("sbom")) return Boxes
+  if (lower.includes("complian")) return ShieldCheck
+  return FileText
+}
+
+function getReportTypeIconColor(kindOrName: string, isSelected: boolean) {
+  if (isSelected) return "text-primary-foreground"
+  const lower = kindOrName.toLowerCase()
+  if (lower.includes("vulnerab")) return "text-red-500 dark:text-red-400"
+  if (lower.includes("config")) return "text-blue-500 dark:text-blue-400"
+  if (lower.includes("secret")) return "text-amber-500 dark:text-amber-400"
+  if (lower.includes("infra")) return "text-indigo-500 dark:text-indigo-400"
+  if (lower.includes("rbac")) return "text-purple-500 dark:text-purple-400"
+  if (lower.includes("sbom")) return "text-emerald-500 dark:text-emerald-400"
+  if (lower.includes("complian")) return "text-teal-500 dark:text-teal-400"
+  return "text-muted-foreground"
 }
 
 export function Sidebar({
@@ -34,28 +92,69 @@ export function Sidebar({
   onSelectType,
 }: SidebarProps) {
   const [isDark, setIsDark] = useState(getInitialTheme)
-
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [isMobileOpen, setIsMobileOpen] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(getInitialWidth)
+  const [isResizing, setIsResizing] = useState(false)
+  const [typeFilterQuery, setTypeFilterQuery] = useState("")
+  const isDraggingRef = useRef(false)
 
   useEffect(() => {
     if (isDark) {
-      document.documentElement.classList.add('dark')
+      document.documentElement.classList.add("dark")
     } else {
-      document.documentElement.classList.remove('dark')
+      document.documentElement.classList.remove("dark")
     }
-    localStorage.setItem('theme', isDark ? 'dark' : 'light')
+    localStorage.setItem("theme", isDark ? "dark" : "light")
   }, [isDark])
 
-  // Close mobile sidebar when clicking outside
+  // Close mobile sidebar on resize
   useEffect(() => {
     const handleResize = () => {
       if (window.innerWidth >= 768) {
         setIsMobileOpen(false)
       }
     }
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
+    window.addEventListener("resize", handleResize)
+    return () => window.removeEventListener("resize", handleResize)
+  }, [])
+
+  // Drag handle to resize sidebar
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (isCollapsed) return
+    e.preventDefault()
+    isDraggingRef.current = true
+    setIsResizing(true)
+    document.body.style.cursor = "col-resize"
+    document.body.style.userSelect = "none"
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!isDraggingRef.current) return
+      const newWidth = Math.min(Math.max(event.clientX, MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH)
+      setSidebarWidth(newWidth)
+    }
+
+    const handleMouseUp = () => {
+      if (!isDraggingRef.current) return
+      isDraggingRef.current = false
+      setIsResizing(false)
+      document.body.style.cursor = ""
+      document.body.style.userSelect = ""
+      setSidebarWidth((w) => {
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w))
+        return w
+      })
+      window.removeEventListener("mousemove", handleMouseMove)
+      window.removeEventListener("mouseup", handleMouseUp)
+    }
+
+    window.addEventListener("mousemove", handleMouseMove)
+    window.addEventListener("mouseup", handleMouseUp)
+  }, [isCollapsed])
+
+  const handleResetWidth = useCallback(() => {
+    setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(DEFAULT_SIDEBAR_WIDTH))
   }, [])
 
   const clusterOptions = useMemo(() => clusters.length > 1
@@ -70,6 +169,17 @@ export function Sidebar({
     if (!a.namespaced && b.namespaced) return 1
     return a.name.localeCompare(b.name)
   }), [reportTypes])
+
+  const filteredReportTypes = useMemo(() => {
+    if (!typeFilterQuery.trim()) return sortedReportTypes
+    const q = typeFilterQuery.toLowerCase().trim()
+    return sortedReportTypes.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        (t.kind && t.kind.toLowerCase().includes(q)) ||
+        formatReportTypeName(t.kind || t.name).toLowerCase().includes(q)
+    )
+  }, [sortedReportTypes, typeFilterQuery])
 
   const reportTypeOptions = useMemo(() => sortedReportTypes.map((t) => ({
     value: t.name,
@@ -89,7 +199,7 @@ export function Sidebar({
   const sidebarContent = (
     <>
       {/* Logo Section */}
-      <div className="flex h-20 items-center justify-between border-b px-4 md:px-6 bg-gradient-to-r from-primary/10 to-purple-500/10">
+      <div className="flex h-16 items-center justify-between border-b px-4 bg-gradient-to-r from-primary/10 to-purple-500/10">
         <button 
           onClick={() => {
             onSelectType?.("")
@@ -102,11 +212,11 @@ export function Sidebar({
           title="Go to Overview"
         >
           <div className="p-2 rounded-xl bg-gradient-to-br from-primary to-purple-600 shadow-lg shadow-primary/25">
-            <Shield className="h-6 w-6 text-white" />
+            <Shield className="h-5 w-5 text-white" />
           </div>
           {!isCollapsed && (
             <div>
-              <h1 className="text-lg font-bold bg-clip-text text-transparent bg-gradient-to-r from-primary to-purple-600">
+              <h1 className="text-base font-bold bg-clip-text text-transparent bg-gradient-to-r from-primary to-purple-600 leading-tight">
                 Trivy UI
               </h1>
               <p className="text-[10px] text-muted-foreground font-medium">Security Dashboard</p>
@@ -116,7 +226,7 @@ export function Sidebar({
         <div className="flex items-center gap-1">
           <button
             onClick={() => setIsDark(!isDark)}
-            className="p-2 rounded-lg hover:bg-muted transition-colors"
+            className="p-1.5 rounded-lg hover:bg-muted transition-colors"
             title={isDark ? "Switch to light mode" : "Switch to dark mode"}
           >
             {isDark ? (
@@ -128,7 +238,7 @@ export function Sidebar({
           {/* Collapse button - desktop only */}
           <button
             onClick={() => setIsCollapsed(!isCollapsed)}
-            className="hidden md:flex p-2 rounded-lg hover:bg-muted transition-colors"
+            className="hidden md:flex p-1.5 rounded-lg hover:bg-muted transition-colors"
             title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
             <ChevronLeft className={cn("h-4 w-4 transition-transform", isCollapsed && "rotate-180")} />
@@ -136,22 +246,45 @@ export function Sidebar({
           {/* Close button - mobile only */}
           <button
             onClick={() => setIsMobileOpen(false)}
-            className="md:hidden p-2 rounded-lg hover:bg-muted transition-colors"
+            className="md:hidden p-1.5 rounded-lg hover:bg-muted transition-colors"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-6 scrollbar-thin">
+      <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-thin">
+        {/* Navigation: Overview Button */}
+        <div>
+          <button
+            onClick={() => {
+              onSelectType?.("")
+              setIsMobileOpen(false)
+            }}
+            className={cn(
+              "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-all duration-200",
+              isCollapsed && "justify-center px-2",
+              !selectedType
+                ? "bg-gradient-to-r from-primary to-primary/85 text-primary-foreground shadow-md shadow-primary/20 font-semibold"
+                : "hover:bg-muted/70 text-foreground/80 hover:text-foreground font-medium"
+            )}
+            title={isCollapsed ? "Cluster Overview" : undefined}
+          >
+            <div className={cn("p-1.5 rounded-lg", !selectedType ? "bg-white/20" : "bg-muted")}>
+              <LayoutDashboard className={cn("h-4 w-4", !selectedType ? "text-primary-foreground" : "text-primary")} />
+            </div>
+            {!isCollapsed && <span className="flex-1 text-left truncate">Overview</span>}
+          </button>
+        </div>
+
         {/* Cluster Selection */}
         {!isSingleClusterMode && (
           <div>
             <label className={cn(
-              "mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider",
+              "mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider",
               isCollapsed && "justify-center"
             )}>
-              <Server className="h-3.5 w-3.5" />
+              <Server className="h-3 w-3" />
               {!isCollapsed && "Cluster"}
             </label>
             {isCollapsed ? (
@@ -171,101 +304,137 @@ export function Sidebar({
           </div>
         )}
 
-
-
-        {/* Report Type Selection */}
+        {/* Report Type Section */}
         <div>
-          <label className={cn(
-            "mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider",
-            isCollapsed && "justify-center"
-          )}>
-            <FileText className="h-3.5 w-3.5" />
-            {!isCollapsed && "Report Type"}
-          </label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className={cn(
+              "flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider",
+              isCollapsed && "justify-center w-full"
+            )}>
+              <Shield className="h-3 w-3" />
+              {!isCollapsed && (
+                <span>
+                  Report Types
+                  <span className="ml-1.5 font-normal text-muted-foreground/70">({sortedReportTypes.length})</span>
+                </span>
+              )}
+            </label>
+          </div>
+
           {!isCollapsed && (
-            <Combobox
-              options={reportTypeOptions}
-              value={selectedType}
-              onValueChange={onSelectType}
-              placeholder="Select report type..."
-            />
+            <div className="mb-2">
+              {sortedReportTypes.length > 8 ? (
+                /* When types are many (>8), provide inline search filter */
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                  <input
+                    type="text"
+                    className="h-8 w-full rounded-lg border bg-background/80 pl-8 pr-7 text-xs outline-none focus:ring-1 focus:ring-primary/50 transition-shadow"
+                    placeholder="Quick search types..."
+                    value={typeFilterQuery}
+                    onChange={(e) => setTypeFilterQuery(e.target.value)}
+                  />
+                  {typeFilterQuery && (
+                    <button
+                      onClick={() => setTypeFilterQuery("")}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+              ) : (
+                /* Compact jump combobox if user prefers dropdown navigation */
+                <Combobox
+                  options={reportTypeOptions}
+                  value={selectedType}
+                  onValueChange={onSelectType}
+                  placeholder="Jump to type..."
+                />
+              )}
+            </div>
           )}
 
           {/* Report Type List */}
-          <nav className="mt-3 space-y-1">
-            {sortedReportTypes.map((type) => {
-                const displayName = formatReportTypeName(type.kind || type.name)
-                const count = reportCounts[type.name]
-                const isSelected = selectedType === type.name
+          <nav className="space-y-1">
+            {filteredReportTypes.map((type) => {
+              const displayName = formatReportTypeName(type.kind || type.name)
+              const count = reportCounts[type.name]
+              const isSelected = selectedType === type.name
+              const IconComponent = getReportTypeIcon(type.kind || type.name)
+              const iconColor = getReportTypeIconColor(type.kind || type.name, isSelected)
 
-                return (
-                  <button
-                    key={type.name}
-                    onClick={() => {
-                      onSelectType?.(type.name)
-                      setIsMobileOpen(false)
-                    }}
-                    className={cn(
-                      "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all duration-200",
-                      isCollapsed && "justify-center px-2",
-                      isSelected
-                        ? "bg-gradient-to-r from-primary to-primary/80 text-primary-foreground shadow-lg shadow-primary/25"
-                        : "hover:bg-muted/70 text-foreground/80 hover:text-foreground"
-                    )}
-                    title={isCollapsed ? displayName : undefined}
-                  >
-                    <div className={cn(
-                      "p-1.5 rounded-lg",
-                      isSelected ? "bg-white/20" : "bg-muted"
-                    )}>
-                      <FileText className="h-3.5 w-3.5" />
-                    </div>
-                    {!isCollapsed && (
-                      <>
-                        <span className="flex-1 text-left truncate font-medium">{displayName}</span>
-                        {count !== undefined && count > 0 && (
-                          <span className={cn(
-                            "flex-shrink-0 rounded-full px-2 py-0.5 min-w-[24px] text-center text-xs font-semibold",
-                            isSelected
-                              ? "bg-white/20 text-primary-foreground"
-                              : "bg-primary/10 text-primary"
-                          )}>
-                            {count > 99 ? "99+" : count}
-                          </span>
-                        )}
-                        {!type.namespaced && (
-                          <span className={cn(
-                            "text-[10px] font-medium px-1.5 py-0.5 rounded",
-                            isSelected
-                              ? "bg-white/20 text-primary-foreground"
-                              : "bg-muted text-muted-foreground"
-                          )}>
-                            Cluster
-                          </span>
-                        )}
-                      </>
-                    )}
-                  </button>
-                )
-              })}
+              return (
+                <button
+                  key={type.name}
+                  onClick={() => {
+                    onSelectType?.(type.name)
+                    setIsMobileOpen(false)
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-xs transition-all duration-150",
+                    isCollapsed && "justify-center px-1.5",
+                    isSelected
+                      ? "bg-gradient-to-r from-primary to-primary/85 text-primary-foreground shadow-sm shadow-primary/20 font-medium"
+                      : "hover:bg-muted/70 text-foreground/80 hover:text-foreground"
+                  )}
+                  title={isCollapsed ? `${displayName}${count !== undefined ? ` (${count})` : ""}` : undefined}
+                >
+                  <div className={cn(
+                    "p-1.5 rounded-lg flex-shrink-0 transition-colors",
+                    isSelected ? "bg-white/20" : "bg-muted"
+                  )}>
+                    <IconComponent className={cn("h-3.5 w-3.5", iconColor)} />
+                  </div>
+                  {!isCollapsed && (
+                    <>
+                      <span className="flex-1 text-left truncate">{displayName}</span>
+                      {count !== undefined && count > 0 && (
+                        <span className={cn(
+                          "flex-shrink-0 rounded-full px-1.5 py-0.2 min-w-[20px] text-center text-[10px] font-semibold",
+                          isSelected
+                            ? "bg-white/20 text-primary-foreground"
+                            : "bg-primary/10 text-primary"
+                        )}>
+                          {count > 99 ? "99+" : count}
+                        </span>
+                      )}
+                      {!type.namespaced && (
+                        <span className={cn(
+                          "text-[9px] font-semibold px-1 py-0.2 rounded uppercase",
+                          isSelected
+                            ? "bg-white/20 text-primary-foreground"
+                            : "bg-muted text-muted-foreground/80"
+                        )}>
+                          Cluster
+                        </span>
+                      )}
+                    </>
+                  )}
+                </button>
+              )
+            })}
+            {filteredReportTypes.length === 0 && (
+              <p className="px-2 py-3 text-center text-xs text-muted-foreground">No matching report types</p>
+            )}
           </nav>
         </div>
       </div>
 
       {/* Footer */}
-      <div className="border-t p-4">
+      <div className="border-t p-3">
         <div className={cn(
-          "flex items-center gap-3 text-xs text-muted-foreground",
+          "flex items-center gap-2 text-xs text-muted-foreground",
           isCollapsed && "justify-center"
         )}>
           <div className="flex items-center gap-1.5" title={`${syncStateConfig.text}${selectedCluster ? ` (${selectedCluster})` : ""}`}>
-            <span className={cn("w-2 h-2 rounded-full", syncStateConfig.color)} />
-            {!isCollapsed && <span>{syncStateConfig.text}</span>}
+            <span className={cn("w-2 h-2 rounded-full flex-shrink-0", syncStateConfig.color)} />
+            {!isCollapsed && <span className="truncate">{syncStateConfig.text}</span>}
           </div>
           {!isCollapsed && !isSingleClusterMode && (
             <>
               <span className="text-muted-foreground/40">•</span>
-              <span>{clusters.length} clusters</span>
+              <span className="truncate">{clusters.length} clusters</span>
             </>
           )}
         </div>
@@ -293,11 +462,31 @@ export function Sidebar({
       )}
 
       {/* Desktop sidebar */}
-      <div className={cn(
-        "hidden md:flex h-screen flex-col border-r bg-card/80 backdrop-blur-sm transition-all duration-300",
-        isCollapsed ? "w-16" : "w-72"
-      )}>
+      <div
+        style={{ width: isCollapsed ? 64 : sidebarWidth }}
+        className={cn(
+          "hidden md:flex h-screen flex-col border-r bg-card/80 backdrop-blur-sm relative",
+          !isResizing && "transition-[width] duration-200"
+        )}
+      >
         {sidebarContent}
+
+        {/* Drag handle for resizing sidebar */}
+        {!isCollapsed && (
+          <div
+            onMouseDown={handleMouseDown}
+            onDoubleClick={handleResetWidth}
+            className={cn(
+              "absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/50 transition-colors z-20 group",
+              isResizing && "bg-primary w-1.5"
+            )}
+            title="Drag to resize sidebar (double-click to reset)"
+          >
+            <div className="absolute top-1/2 -translate-y-1/2 right-[-6px] opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none p-0.5 rounded bg-card border shadow-xs">
+              <GripVertical className="h-3 w-3 text-muted-foreground" />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Mobile sidebar */}
@@ -310,3 +499,4 @@ export function Sidebar({
     </>
   )
 }
+

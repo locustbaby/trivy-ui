@@ -6,7 +6,9 @@
 - [Installation and configuration](user-guide/01-installation.md)
 - [Authentication and access control](user-guide/02-authentication-and-access-control.md)
 - [Multi-cluster collection](user-guide/03-multi-cluster-collection.md)
+- [Dashboard features and navigation](user-guide/05-dashboard-features-and-navigation.md)
 - [Operations and troubleshooting](user-guide/04-operations-and-troubleshooting.md)
+
 
 ## Project documentation
 

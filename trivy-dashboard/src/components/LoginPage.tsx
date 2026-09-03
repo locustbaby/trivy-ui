@@ -1,6 +1,6 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import type { FormEvent } from "react"
-import { Shield, Loader2 } from "lucide-react"
+import { Shield, Loader2, Eye, EyeOff } from "lucide-react"
 import { api, ApiError } from "../api/client"
 import { Button } from "./ui/button"
 import { ConfigErrorPage, CustomErrorPageContent } from "./CustomErrorPage"
@@ -10,19 +10,36 @@ interface LoginPageProps {
   onLogin: () => Promise<void>
 }
 
+const REMEMBER_USERNAME_KEY = "trivy-ui-remembered-username"
+
 export function LoginPage({ onLogin }: LoginPageProps) {
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
+  const [showPassword, setShowPassword] = useState(false)
+  const [rememberUsername, setRememberUsername] = useState(false)
   const [error, setError] = useState<string>()
   const [errorStatus, setErrorStatus] = useState<number>()
   const [loading, setLoading] = useState(false)
   const customErrorPage = useCustomErrorPage()
+
+  useEffect(() => {
+    const saved = localStorage.getItem(REMEMBER_USERNAME_KEY)
+    if (saved) {
+      setUsername(saved)
+      setRememberUsername(true)
+    }
+  }, [])
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setError(undefined)
     setLoading(true)
     try {
+      if (rememberUsername) {
+        localStorage.setItem(REMEMBER_USERNAME_KEY, username.trim())
+      } else {
+        localStorage.removeItem(REMEMBER_USERNAME_KEY)
+      }
       await api.login(username, password)
       await onLogin()
     } catch (err) {
@@ -67,7 +84,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-background to-muted/50 p-6">
-      <form onSubmit={submit} className="w-full max-w-sm space-y-5 rounded-2xl border bg-card p-8 shadow-xl">
+      <form onSubmit={submit} className="w-full max-w-sm space-y-5 rounded-2xl border bg-card p-8 shadow-xl" method="post" action="#">
         <div className="flex flex-col items-center gap-3 text-center">
           <Shield className="h-12 w-12 text-primary" />
           <div>
@@ -75,14 +92,62 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             <p className="text-sm text-muted-foreground">Sign in to continue</p>
           </div>
         </div>
-        <label className="block space-y-2 text-sm font-medium">
-          Username
-          <input className="h-10 w-full rounded-md border bg-background px-3 font-normal outline-none focus:ring-2 focus:ring-ring" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required />
-        </label>
-        <label className="block space-y-2 text-sm font-medium">
-          Password
-          <input type="password" className="h-10 w-full rounded-md border bg-background px-3 font-normal outline-none focus:ring-2 focus:ring-ring" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required />
-        </label>
+        <div className="space-y-2">
+          <label htmlFor="username" className="block text-sm font-medium">
+            Username
+          </label>
+          <input
+            id="username"
+            name="username"
+            type="text"
+            className="h-10 w-full rounded-md border bg-background px-3 font-normal outline-none focus:ring-2 focus:ring-ring"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username"
+            required
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck="false"
+          />
+        </div>
+        <div className="space-y-2">
+          <label htmlFor="password" className="block text-sm font-medium">
+            Password
+          </label>
+          <div className="relative flex items-center">
+            <input
+              id="password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              className="h-10 w-full rounded-md border bg-background pl-3 pr-10 font-normal outline-none focus:ring-2 focus:ring-ring"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete="current-password"
+              required
+            />
+            <button
+              type="button"
+              className="absolute right-3 text-muted-foreground hover:text-foreground focus:outline-none"
+              onClick={() => setShowPassword(!showPassword)}
+              tabIndex={-1}
+              title={showPassword ? "Hide password" : "Show password"}
+              aria-label={showPassword ? "Hide password" : "Show password"}
+            >
+              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+        </div>
+        <div className="flex items-center justify-between text-sm">
+          <label className="flex items-center gap-2 cursor-pointer select-none text-muted-foreground hover:text-foreground">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border border-primary text-primary focus:ring-2 focus:ring-ring"
+              checked={rememberUsername}
+              onChange={(e) => setRememberUsername(e.target.checked)}
+            />
+            Remember username
+          </label>
+        </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <Button type="submit" className="w-full" disabled={loading}>
           {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
@@ -92,3 +157,4 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     </div>
   )
 }
+
