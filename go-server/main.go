@@ -187,6 +187,15 @@ func main() {
 		utils.LogError("Failed to initialize authentication", map[string]interface{}{"error": err.Error()})
 		os.Exit(1)
 	}
+	rescanConfig, err := api.RescanConfigFromEnv()
+	if err != nil {
+		utils.LogError("Failed to parse rescan configuration", map[string]interface{}{"error": err.Error()})
+		os.Exit(1)
+	}
+	if rescanConfig.Enabled && !authService.IsEnabled() {
+		utils.LogWarning("ENABLE_RESCAN has no effect without authentication (AUTH_MODE=local or proxy)", nil)
+	}
+	api.ConfigureRescan(rescanConfig)
 	sourceScope, err := dataaccess.NewFromEnv()
 	if err != nil {
 		utils.LogError("Failed to initialize cluster source scope", map[string]interface{}{"error": err.Error()})

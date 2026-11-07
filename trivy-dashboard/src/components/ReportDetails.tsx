@@ -1,13 +1,14 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { api, ApiError, type Report } from "../api/client"
 import { Button } from "./ui/button"
-import { X, Loader2, Check, Share2 } from "lucide-react"
+import { X, Loader2, Check, Share2, RefreshCw } from "lucide-react"
 import { ReportInfoCard } from "./reports/ReportInfoCard"
 import { SummaryCard } from "./reports/SummaryCard"
 import { VulnerabilitySection, type Vulnerability } from "./reports/VulnerabilitySection"
 import { ChecksSection, type Check as ReportCheck } from "./reports/ChecksSection"
 import { formatReportTypeName } from "../lib/utils"
 import { toast } from "../lib/toast"
+import { canRescanType, describeRescan, RESCAN_POLL_INTERVAL, useRescanCapabilities } from "../lib/rescan"
 
 const DETAIL_REFRESH_INTERVAL = 15000
 
@@ -45,6 +46,11 @@ export function ReportDetails({
   const [error, setError] = useState<string>()
   const [errorStatus, setErrorStatus] = useState<number>()
   const [copied, setCopied] = useState(false)
+  const [confirmRescan, setConfirmRescan] = useState(false)
+  const [rescanSubmitting, setRescanSubmitting] = useState(false)
+  const rescanCapabilities = useRescanCapabilities()
+  const rescanning = Boolean(report?.rescan)
+  const wasRescanningRef = useRef(false)
   const requestGenerationRef = useRef(0)
   const activeRequestRef = useRef<AbortController | null>(null)
 
@@ -118,7 +124,7 @@ export function ReportDetails({
       if (document.visibilityState === "visible") {
         runRefresh()
       }
-    }, DETAIL_REFRESH_INTERVAL)
+    }, rescanning ? RESCAN_POLL_INTERVAL : DETAIL_REFRESH_INTERVAL)
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -136,7 +142,32 @@ export function ReportDetails({
       window.removeEventListener("focus", runRefresh)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
-  }, [loadReport])
+  }, [loadReport, rescanning])
+
+  useEffect(() => {
+    if (wasRescanningRef.current && report && !report.rescan) {
+      toast("Rescan finished: showing the new result.", "success")
+    }
+    wasRescanningRef.current = Boolean(report?.rescan)
+  }, [report])
+
+  const handleRescan = useCallback(() => {
+    if (!report) return
+    setRescanSubmitting(true)
+    api.rescanReport(report.cluster || cluster || "", report.namespace ?? namespace ?? "", typeName, reportName)
+      .then((result) => {
+        setReport((current) => (current ? { ...current, rescan: result.rescan } : current))
+        toast("Rescan requested. The current result stays visible until the new scan is done.", "info")
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : "Rescan failed"
+        toast(`Could not request a rescan: ${message}`, "error")
+      })
+      .finally(() => {
+        setRescanSubmitting(false)
+        setConfirmRescan(false)
+      })
+  }, [report, cluster, namespace, typeName, reportName])
 
   // Handle ESC key to close
   useEffect(() => {
@@ -278,6 +309,31 @@ export function ReportDetails({
             </div>
           </div>
           <div className="flex items-center gap-1.5 flex-shrink-0">
+            {report && canRescanType(rescanCapabilities, typeName) && (
+              confirmRescan ? (
+                <>
+                  <Button onClick={handleRescan} size="sm" className="gap-1.5 h-8 px-2.5" disabled={rescanSubmitting}>
+                    {rescanSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    <span className="text-xs">Rescan now</span>
+                  </Button>
+                  <Button onClick={() => setConfirmRescan(false)} variant="ghost" size="sm" className="h-8 px-2.5" disabled={rescanSubmitting}>
+                    <span className="text-xs">Cancel</span>
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  onClick={() => setConfirmRescan(true)}
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 h-8 px-2.5"
+                  disabled={rescanning}
+                  title={rescanning && report.rescan ? describeRescan(report.rescan) : "Scan this workload again"}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${rescanning ? "animate-spin" : ""}`} />
+                  <span className="text-xs">{rescanning ? "Scanning…" : "Rescan"}</span>
+                </Button>
+              )
+            )}
             {shareUrl && (
               <Button onClick={handleCopyLink} variant="outline" size="sm" className="gap-1.5 h-8 px-2.5">
                 {copied ? (
@@ -320,6 +376,11 @@ export function ReportDetails({
           )}
           {report && !loading && !error && (
             <div className="space-y-3">
+              {report.rescan && (
+                <div role="status" className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-700 dark:text-sky-300">
+                  {describeRescan(report.rescan)}. This is the previous result; it is replaced automatically when the new scan is done. Scans run one at a time, so this can take a while.
+                </div>
+              )}
               {report.stale && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
                   This detail is from the local cache and may be stale because the cluster is currently unavailable.

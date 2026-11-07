@@ -13,6 +13,14 @@ rules:
     verbs:
       - get
       - list
-      - watch  
-  
+      - watch
+  {{- if .Values.rescan.enabled }}
+  # Rescan deletes a report so the Trivy Operator scans the workload again.
+  - apiGroups:
+      - aquasecurity.github.io
+    resources:
+      {{- toYaml .Values.rescan.types | nindent 6 }}
+    verbs:
+      - delete
+  {{- end }}
 {{- end }}

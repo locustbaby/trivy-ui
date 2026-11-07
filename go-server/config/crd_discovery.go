@@ -46,6 +46,18 @@ func NewCRDRegistry() *CRDRegistry {
 	}
 }
 
+// NewStaticCRDRegistry returns a registry with a fixed set of report kinds
+// (tests, or clusters whose CRDs are known up front).
+func NewStaticCRDRegistry(reports []ReportKind) *CRDRegistry {
+	registry := NewCRDRegistry()
+	registry.reports = append([]ReportKind(nil), reports...)
+	for i := range registry.reports {
+		registry.reportsByName[registry.reports[i].Name] = &registry.reports[i]
+	}
+	registry.lastRefresh = time.Now()
+	return registry
+}
+
 func (r *CRDRegistry) DiscoverCRDs(config *rest.Config) error {
 
 	if err := r.DiscoverCRDsFromAPIResources(config); err == nil {

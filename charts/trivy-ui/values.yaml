@@ -107,7 +107,14 @@ customErrorPage:
 
 # Application authentication. The default preserves the existing open dashboard.
 auth:
-  mode: none # none | local
+  mode: none # none | local | proxy
+  # mode=proxy: an authenticating reverse proxy (Authelia, oauth2-proxy, ...)
+  # signs users in and passes the identity in headers, which are trusted only
+  # from trustedCIDRs. Restrict who can reach the pod (NetworkPolicy).
+  proxy:
+    userHeader: Remote-User
+    groupsHeader: Remote-Groups
+    trustedCIDRs: ""
   local:
     backend: file
     existingSecret: "trivy-ui-auth"
@@ -119,6 +126,27 @@ auth:
     # Empty derives a secure cross-site policy when CORS_ALLOWED_ORIGINS names exact origins.
     # Set lax, strict, or none to override the derived policy explicitly.
     cookieSameSite: ""
+
+# Rescan: lets signed-in users ask the Trivy Operator to scan a workload again
+# by deleting its report (the operator recreates it). Needs auth.mode local or
+# proxy, and grants the ClusterRole delete on the listed report types.
+rescan:
+  enabled: false
+  # Groups allowed to rescan; empty allows every signed-in user.
+  groups: []
+  types:
+    - vulnerabilityreports
+    - exposedsecretreports
+    - sbomreports
+    - configauditreports
+    - rbacassessmentreports
+    - infraassessmentreports
+    - clusterconfigauditreports
+    - clusterrbacassessmentreports
+    - clusterinfraassessmentreports
+  # Forget a rescan whose report never comes back after this long.
+  timeout: 6h
+  maxBulk: 50
 
 # Kubeconfig secret configuration
 kubeconfigs:

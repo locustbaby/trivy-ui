@@ -90,6 +90,15 @@ func (r *Router) Setup(staticPath string) {
 	r.mux.HandleFunc("/api/v1/reports/", func(w http.ResponseWriter, req *http.Request) {
 		path := strings.TrimPrefix(req.URL.Path, "/api/v1/reports/")
 		parts := strings.Split(path, "/")
+		if req.Method == http.MethodPost && len(parts) == 5 && parts[4] == "rescan" {
+			ref, ok := unescapeReportRef(parts[:4])
+			if !ok {
+				http.NotFound(w, req)
+				return
+			}
+			r.handler.RescanReport(w, req, ref.Cluster, ref.Type, ref.Namespace, ref.Name)
+			return
+		}
 		if req.Method == http.MethodGet || req.Method == http.MethodOptions {
 			if len(parts) == 4 {
 				cluster, err := url.PathUnescape(parts[0])
@@ -120,6 +129,17 @@ func (r *Router) Setup(staticPath string) {
 			}
 			http.NotFound(w, req)
 		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	r.mux.HandleFunc("/api/v1/rescan", func(w http.ResponseWriter, req *http.Request) {
+		switch req.Method {
+		case http.MethodGet, http.MethodOptions:
+			r.handler.RescanStatus(w, req)
+		case http.MethodPost:
+			r.handler.RescanBulk(w, req)
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
@@ -245,6 +265,22 @@ func (r *Router) Setup(staticPath string) {
 
 	r.mux.HandleFunc("/", SpaHandler(staticPath))
 
+}
+
+func unescapeReportRef(parts []string) (ReportRef, bool) {
+	values := make([]string, len(parts))
+	for i, part := range parts {
+		value, err := url.PathUnescape(part)
+		if err != nil || value == "" {
+			return ReportRef{}, false
+		}
+		values[i] = value
+	}
+	namespace := values[2]
+	if namespace == auth.ClusterScopedNamespace {
+		namespace = ""
+	}
+	return ReportRef{Cluster: values[0], Type: values[1], Namespace: namespace, Name: values[3]}, true
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {

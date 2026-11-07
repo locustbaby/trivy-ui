@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -345,6 +346,32 @@ func (c *Client) GetReportDetails(ctx context.Context, reportType config.ReportK
 		Status:          status,
 		Data:            report.Object,
 	}, nil
+}
+
+// NewClientFromDynamic builds a report-only client around an existing dynamic
+// client (tests, embedding).
+func NewClientFromDynamic(dynamicClient dynamic.Interface) *Client {
+	return &Client{dynamic: dynamicClient}
+}
+
+// DeleteReport deletes a report so the Trivy Operator scans the workload again.
+// The UID precondition makes sure only the report that was looked at is
+// deleted, never a newer one with the same name.
+func (c *Client) DeleteReport(ctx context.Context, reportType config.ReportKind, namespace, name, uid string) error {
+	if !reportType.Namespaced && namespace != "" {
+		return fmt.Errorf("cluster-scoped report cannot specify namespace")
+	}
+	group, version := parseAPIVersion(reportType.APIVersion)
+	gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: reportType.Name}
+	options := metav1.DeleteOptions{}
+	if uid != "" {
+		value := types.UID(uid)
+		options.Preconditions = &metav1.Preconditions{UID: &value}
+	}
+	if reportType.Namespaced {
+		return c.dynamic.Resource(gvr).Namespace(namespace).Delete(ctx, name, options)
+	}
+	return c.dynamic.Resource(gvr).Delete(ctx, name, options)
 }
 
 func (c *Client) GetReports(ctx context.Context, namespace string) ([]Report, error) {
