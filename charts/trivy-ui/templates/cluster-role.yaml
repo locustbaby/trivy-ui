@@ -13,6 +13,15 @@ rules:
     verbs:
       - get
       - list
-      - watch  
-  
+      - watch
+  # Maps ReplicaSets to their Deployment and detects retired ReplicaSets
+  # (scaled to zero); without it names are derived from the report name.
+  - apiGroups:
+      - apps
+    resources:
+      - replicasets
+    verbs:
+      - list
+      - watch
+
 {{- end }}

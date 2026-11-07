@@ -1555,7 +1555,10 @@ func (c *CacheUpdaterImpl) SetReport(cluster, namespace, reportType, name string
 	previous, found := cache.Get(key)
 	if found {
 		if previousReport, ok := decodeReportValue(previous); ok {
-			if previousReport.ResourceVersion == apiReport.ResourceVersion && !previousReport.Stale {
+			// Summaries cached by an older version lack the derived counts and
+			// are refreshed once even though the report did not change.
+			if previousReport.ResourceVersion == apiReport.ResourceVersion && !previousReport.Stale &&
+				derivedVersion(previousReport) == derivedVersion(apiReport) {
 				return
 			}
 			if hasVulnerabilitiesInReport(previousReport) != hasVulnerabilitiesInReport(apiReport) {
@@ -2001,208 +2004,48 @@ func extractSummaryCounts(report Report) (int, int, int, int) {
 }
 
 func (c *Cache) GetOverviewData(clusterFilter string) *ClusterOverview {
-	overview := &ClusterOverview{
-		SeverityTotals:         SeverityTotals{},
-		ScanTypesBreakdown:     make(map[string]TypeBreakdown),
-		TopVulnerableWorkloads: make([]WorkloadSummary, 0),
-		VulnerableClusters:     make([]ClusterSummary, 0),
-		VulnerableNamespaces:   make([]NamespaceSummary, 0),
-	}
-
-	workloadScores := make(map[string]*WorkloadSummary)
-	nsScores := make(map[string]*NamespaceSummary)
-	clusterScores := make(map[string]*ClusterSummary)
-
-	for _, report := range c.ReportSummaries() {
-		if clusterFilter != "" && report.Cluster != clusterFilter {
-			continue
-		}
-
-		overview.TotalReports++
-
-		cCount, hCount, mCount, lCount := extractSummaryCounts(report)
-
-		overview.SeverityTotals.Critical += cCount
-		overview.SeverityTotals.High += hCount
-		overview.SeverityTotals.Medium += mCount
-		overview.SeverityTotals.Low += lCount
-
-		tb := overview.ScanTypesBreakdown[report.Type]
-		tb.Scanned++
-		if cCount > 0 || hCount > 0 || mCount > 0 || lCount > 0 {
-			tb.Failed++
-		}
-		tb.Critical += cCount
-		overview.ScanTypesBreakdown[report.Type] = tb
-
-		if cCount > 0 || hCount > 0 {
-			wKey := fmt.Sprintf("%s:%s:%s:%s", report.Cluster, report.Namespace, report.Type, report.Name)
-			if _, exists := workloadScores[wKey]; !exists {
-				workloadScores[wKey] = &WorkloadSummary{
-					Cluster: report.Cluster, Namespace: report.Namespace, Name: report.Name, Type: report.Type,
-				}
-			}
-			workloadScores[wKey].Critical += cCount
-			workloadScores[wKey].High += hCount
-
-			nsKey := fmt.Sprintf("%s:%s", report.Cluster, report.Namespace)
-			if _, exists := nsScores[nsKey]; !exists {
-				nsScores[nsKey] = &NamespaceSummary{Cluster: report.Cluster, Name: report.Namespace}
-			}
-			nsScores[nsKey].Critical += cCount
-			nsScores[nsKey].High += hCount
-
-			cKey := report.Cluster
-			if _, exists := clusterScores[cKey]; !exists {
-				clusterScores[cKey] = &ClusterSummary{Name: report.Cluster}
-			}
-			clusterScores[cKey].Critical += cCount
-			clusterScores[cKey].High += hCount
-		}
-	}
-
-	for _, w := range workloadScores {
-		overview.TopVulnerableWorkloads = append(overview.TopVulnerableWorkloads, *w)
-	}
-	sort.Slice(overview.TopVulnerableWorkloads, func(i, j int) bool {
-		if overview.TopVulnerableWorkloads[i].Critical != overview.TopVulnerableWorkloads[j].Critical {
-			return overview.TopVulnerableWorkloads[i].Critical > overview.TopVulnerableWorkloads[j].Critical
-		}
-		return overview.TopVulnerableWorkloads[i].High > overview.TopVulnerableWorkloads[j].High
-	})
-	if len(overview.TopVulnerableWorkloads) > 5 {
-		overview.TopVulnerableWorkloads = overview.TopVulnerableWorkloads[:5]
-	}
-
+	overview := aggregateOverview(c.ReportSummaries(), func(report Report) bool {
+		return clusterFilter == "" || report.Cluster == clusterFilter
+	}, registryWorkloadResolver(GetDefaultRegistry()))
 	if clusterFilter == "" {
-		for _, cScore := range clusterScores {
-			overview.VulnerableClusters = append(overview.VulnerableClusters, *cScore)
-		}
-		sort.Slice(overview.VulnerableClusters, func(i, j int) bool {
-			if overview.VulnerableClusters[i].Critical != overview.VulnerableClusters[j].Critical {
-				return overview.VulnerableClusters[i].Critical > overview.VulnerableClusters[j].Critical
-			}
-			return overview.VulnerableClusters[i].High > overview.VulnerableClusters[j].High
-		})
+		overview.VulnerableNamespaces = []NamespaceSummary{}
 	} else {
-		for _, ns := range nsScores {
-			overview.VulnerableNamespaces = append(overview.VulnerableNamespaces, *ns)
-		}
-		sort.Slice(overview.VulnerableNamespaces, func(i, j int) bool {
-			if overview.VulnerableNamespaces[i].Critical != overview.VulnerableNamespaces[j].Critical {
-				return overview.VulnerableNamespaces[i].Critical > overview.VulnerableNamespaces[j].Critical
-			}
-			return overview.VulnerableNamespaces[i].High > overview.VulnerableNamespaces[j].High
-		})
+		overview.VulnerableClusters = []ClusterSummary{}
 	}
-
 	return overview
 }
 
 func (c *Cache) recordTrend() {
 	records := c.trendHistory()
-
-	global := c.GetOverviewData("")
 	now := time.Now()
 
-	records = append(records, TrendRecord{
-		Timestamp: now,
-		Cluster:   "",
-		Critical:  global.SeverityTotals.Critical,
-		High:      global.SeverityTotals.High,
-		Medium:    global.SeverityTotals.Medium,
-	})
-
-	clusterNames := make(map[string]struct{})
-	for _, client := range GetAllClusterClients() {
-		clusterNames[client.Name] = struct{}{}
-	}
-	for _, report := range c.ReportSummaries() {
-		clusterNames[report.Cluster] = struct{}{}
-	}
-	for clusterName := range clusterNames {
-		co := c.GetOverviewData(clusterName)
-		records = append(records, TrendRecord{
-			Timestamp: now,
-			Cluster:   clusterName,
-			Critical:  co.SeverityTotals.Critical,
-			High:      co.SeverityTotals.High,
-			Medium:    co.SeverityTotals.Medium,
-		})
-	}
-
-	type trendCounts struct{ critical, high, medium int }
-	scoped := make(map[string]*trendCounts)
-	scopeNames := make(map[string]map[string]struct{})
+	// Every known cluster and namespace gets a record, also when it has no
+	// findings, so charts drop to zero instead of keeping the last value.
+	scopes := make(map[string]map[string]struct{})
 	for _, client := range GetAllClusterClients() {
 		client.mu.RLock()
+		scopes[client.Name] = map[string]struct{}{auth.ClusterScopedNamespace: {}}
 		for _, namespace := range client.Namespaces {
-			if scopeNames[client.Name] == nil {
-				scopeNames[client.Name] = make(map[string]struct{})
-			}
-			scopeNames[client.Name][namespace] = struct{}{}
+			scopes[client.Name][namespace] = struct{}{}
 		}
-		if scopeNames[client.Name] == nil {
-			scopeNames[client.Name] = make(map[string]struct{})
-		}
-		scopeNames[client.Name][auth.ClusterScopedNamespace] = struct{}{}
 		client.mu.RUnlock()
 	}
-	for _, report := range c.ReportSummaries() {
-		scopeName := report.Namespace
-		if scopeName == "" {
-			scopeName = auth.ClusterScopedNamespace
-		}
-		if scopeNames[report.Cluster] == nil {
-			scopeNames[report.Cluster] = make(map[string]struct{})
-		}
-		scopeNames[report.Cluster][scopeName] = struct{}{}
-		counts := scoped[report.Cluster+"\x00"+scopeName]
-		if counts == nil {
-			counts = &trendCounts{}
-			scoped[report.Cluster+"\x00"+scopeName] = counts
-		}
-		counts.critical, counts.high, counts.medium, _ = addSummaryCounts(counts.critical, counts.high, counts.medium, report)
-	}
-	for clusterName, scopes := range scopeNames {
-		for scopeName := range scopes {
-			key := clusterName + "\x00" + scopeName
-			counts := scoped[key]
-			if counts == nil {
-				counts = &trendCounts{}
-			}
-			records = append(records, TrendRecord{
-				Timestamp: now,
-				Cluster:   clusterName,
-				Namespace: scopeName,
-				Critical:  counts.critical,
-				High:      counts.high,
-				Medium:    counts.medium,
-			})
-		}
+	for _, record := range vulnerabilityTrendRecords(c.ReportSummaries(), registryWorkloadResolver(GetDefaultRegistry()), scopes) {
+		record.Timestamp = now
+		records = append(records, record)
 	}
 
 	// A process restart can run recordTrend twice in the same hour. Replace the
 	// existing bucket rather than appending a second point for the same scope.
-	bucket := now.UTC().Truncate(time.Hour)
 	buckets := make(map[string]TrendRecord, len(records))
 	for _, record := range records {
 		if record.Timestamp.Before(now.Add(-90 * 24 * time.Hour)) {
 			continue
 		}
 		record.Timestamp = record.Timestamp.UTC().Truncate(time.Hour)
-		key := fmt.Sprintf("%d\x00%s\x00%s", record.Timestamp.Unix(), record.Cluster, record.Namespace)
+		key := fmt.Sprintf("%d\x00%s\x00%s\x00%s", record.Timestamp.Unix(), record.Cluster, record.Namespace, record.Kind)
 		buckets[key] = record
 	}
-	globalRecord := TrendRecord{
-		Timestamp: bucket,
-		Cluster:   "",
-		Critical:  global.SeverityTotals.Critical,
-		High:      global.SeverityTotals.High,
-		Medium:    global.SeverityTotals.Medium,
-	}
-	globalKey := fmt.Sprintf("%d\x00%s\x00%s", bucket.Unix(), globalRecord.Cluster, globalRecord.Namespace)
-	buckets[globalKey] = globalRecord
 	records = records[:0]
 	for _, record := range buckets {
 		records = append(records, record)
@@ -2210,6 +2053,9 @@ func (c *Cache) recordTrend() {
 	sort.Slice(records, func(i, j int) bool {
 		if records[i].Timestamp.Equal(records[j].Timestamp) {
 			if records[i].Cluster == records[j].Cluster {
+				if records[i].Namespace == records[j].Namespace {
+					return records[i].Kind < records[j].Kind
+				}
 				return records[i].Namespace < records[j].Namespace
 			}
 			return records[i].Cluster < records[j].Cluster
@@ -2236,11 +2082,6 @@ func (c *Cache) recordTrend() {
 	if err := writePrivateAtomic(trendHistoryPath(), b); err != nil {
 		utils.LogWarning("Failed to save trend history", map[string]interface{}{"error": err.Error()})
 	}
-}
-
-func addSummaryCounts(critical, high, medium int, report Report) (int, int, int, int) {
-	c, h, m, l := extractSummaryCounts(report)
-	return critical + c, high + h, medium + m, l
 }
 
 func (c *Cache) periodicTrendRecord() {

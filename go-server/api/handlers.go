@@ -84,8 +84,10 @@ type Report struct {
 	Stale           bool        `json:"stale,omitempty"`
 	Data            interface{} `json:"data"`
 	Ref             ReportRef   `json:"ref"`
-	SortKey         string      `json:"-"`
-	UpdatedAt       time.Time   `json:"updated_at"`
+	// Workload the report belongs to (set in list responses).
+	Workload  *kubernetes.Workload `json:"workload,omitempty"`
+	SortKey   string               `json:"-"`
+	UpdatedAt time.Time            `json:"updated_at"`
 }
 
 type ReportRef struct {
@@ -128,57 +130,87 @@ func getReportDetailSingleflight(ctx context.Context, key string, fetch func() (
 	return report, err
 }
 
+// SeverityTotals adds up every report type (CVEs, misconfigurations, RBAC,
+// secrets). Kept for API compatibility; use ClusterOverview.Families.
 type SeverityTotals struct {
 	Critical int `json:"critical"`
 	High     int `json:"high"`
 	Medium   int `json:"medium"`
 	Low      int `json:"low"`
+	Unknown  int `json:"unknown"`
 }
 
 type TypeBreakdown struct {
-	Scanned  int `json:"scanned"`
+	Scanned      int `json:"scanned"`
+	WithFindings int `json:"with_findings"`
+	// Deprecated: same as WithFindings. The operator writes no report for a
+	// failed scan, so scan failures cannot be counted here.
 	Failed   int `json:"failed"`
 	Critical int `json:"critical"`
 }
 
+// WorkloadSummary is a workload (the Deployment behind a ReplicaSet, a
+// StatefulSet, ...) with the vulnerabilities of all its containers.
 type WorkloadSummary struct {
-	Cluster   string `json:"cluster"`
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	Critical  int    `json:"critical"`
-	High      int    `json:"high"`
+	Cluster         string   `json:"cluster"`
+	Namespace       string   `json:"namespace"`
+	Name            string   `json:"name"`
+	Kind            string   `json:"kind,omitempty"`
+	Type            string   `json:"type"`
+	Critical        int      `json:"critical"`
+	High            int      `json:"high"`
+	FixableCritical int      `json:"fixable_critical"`
+	FixableHigh     int      `json:"fixable_high"`
+	Reports         []string `json:"reports,omitempty"`
 }
 
 type ClusterSummary struct {
-	Name     string `json:"name"`
-	Critical int    `json:"critical"`
-	High     int    `json:"high"`
+	Name            string `json:"name"`
+	Critical        int    `json:"critical"`
+	High            int    `json:"high"`
+	FixableCritical int    `json:"fixable_critical"`
+	FixableHigh     int    `json:"fixable_high"`
 }
 
 type NamespaceSummary struct {
-	Cluster  string `json:"cluster"`
-	Name     string `json:"name"`
-	Critical int    `json:"critical"`
-	High     int    `json:"high"`
+	Cluster         string `json:"cluster"`
+	Name            string `json:"name"`
+	Critical        int    `json:"critical"`
+	High            int    `json:"high"`
+	FixableCritical int    `json:"fixable_critical"`
+	FixableHigh     int    `json:"fixable_high"`
 }
 
 type ClusterOverview struct {
-	TotalReports           int                      `json:"total_reports"`
-	SeverityTotals         SeverityTotals           `json:"severity_totals"`
-	ScanTypesBreakdown     map[string]TypeBreakdown `json:"scan_types_breakdown"`
-	TopVulnerableWorkloads []WorkloadSummary        `json:"top_vulnerable_workloads"`
-	VulnerableClusters     []ClusterSummary         `json:"vulnerable_clusters,omitempty"`
-	VulnerableNamespaces   []NamespaceSummary       `json:"vulnerable_namespaces,omitempty"`
+	TotalReports   int            `json:"total_reports"`
+	SeverityTotals SeverityTotals `json:"severity_totals"`
+	Families       FamilyOverview `json:"families"`
+	RetiredReports int            `json:"retired_reports"`
+	// Reports not rescanned for longer than StaleAfterHours (SCAN_STALE_AFTER):
+	// the operator may not be scanning.
+	StaleReports       int                      `json:"stale_reports"`
+	StaleAfterHours    int                      `json:"stale_after_hours"`
+	ScanTypesBreakdown map[string]TypeBreakdown `json:"scan_types_breakdown"`
+	// Vulnerability reports only, grouped by workload.
+	TopVulnerableWorkloads []WorkloadSummary  `json:"top_vulnerable_workloads"`
+	VulnerableClusters     []ClusterSummary   `json:"vulnerable_clusters,omitempty"`
+	VulnerableNamespaces   []NamespaceSummary `json:"vulnerable_namespaces,omitempty"`
 }
 
 type TrendRecord struct {
 	Timestamp time.Time `json:"timestamp"`
 	Cluster   string    `json:"cluster"`
 	Namespace string    `json:"namespace,omitempty"`
-	Critical  int       `json:"critical"`
-	High      int       `json:"high"`
-	Medium    int       `json:"medium"`
+	// Kind "vulnerabilities": vulnerability reports only. Empty: recorded by an
+	// older version that added up every report type.
+	Kind            string `json:"kind,omitempty"`
+	Critical        int    `json:"critical"`
+	High            int    `json:"high"`
+	Medium          int    `json:"medium"`
+	Low             int    `json:"low,omitempty"`
+	Unknown         int    `json:"unknown,omitempty"`
+	FixableCritical int    `json:"fixable_critical,omitempty"`
+	FixableHigh     int    `json:"fixable_high,omitempty"`
 }
 
 type Handler struct {
@@ -875,7 +907,7 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 			Page:                page,
 			PageSize:            pageSize,
 			HasNext:             page*pageSize < result.Total,
-			Data:                result.Items,
+			Data:                h.listItems(result.Items),
 		},
 	})
 }
@@ -1121,7 +1153,7 @@ func (h *Handler) getOverviewForScopeCached(clusterFilter string, scope auth.Acc
 		return h.emptyOverview()
 	}
 
-	key := fmt.Sprintf("%s\x00%s\x00%d", clusterFilter, scope.Fingerprint, getTypeVersion("", ""))
+	key := fmt.Sprintf("%s\x00%s\x00%d\x00%d", clusterFilter, scope.Fingerprint, getTypeVersion("", ""), workloadGeneration(h.clusterReg))
 	versionAtStart := getTypeVersion("", "")
 	now := time.Now()
 	overviewMemo.mu.Lock()
@@ -1186,82 +1218,29 @@ func (h *Handler) getOverviewForScopeCached(clusterFilter string, scope auth.Acc
 	return result
 }
 
+// listItems adds the workload (owning Deployment, retired state) to list
+// items and leaves out the compact findings kept for the CVE view.
+func (h *Handler) listItems(reports []Report) []Report {
+	resolve := registryWorkloadResolver(h.clusterReg)
+	decorated := make([]Report, len(reports))
+	for i, report := range reports {
+		workload := resolve(report)
+		report.Workload = &workload
+		report.Data = withoutFindings(report.Data)
+		decorated[i] = report
+	}
+	return decorated
+}
+
 func (h *Handler) getOverviewForScope(clusterFilter string, scope auth.AccessSnapshot) *ClusterOverview {
-	overview := &ClusterOverview{
-		SeverityTotals:         SeverityTotals{},
-		ScanTypesBreakdown:     make(map[string]TypeBreakdown),
-		TopVulnerableWorkloads: []WorkloadSummary{},
-		VulnerableClusters:     []ClusterSummary{},
-		VulnerableNamespaces:   []NamespaceSummary{},
-	}
-	workloadScores := make(map[string]*WorkloadSummary)
-	nsScores := make(map[string]*NamespaceSummary)
-	clusterScores := make(map[string]*ClusterSummary)
-	for _, report := range h.reportSummaries() {
-		if clusterFilter != "" && report.Cluster != clusterFilter || !scope.CanRead(report.Cluster, report.Namespace) {
-			continue
-		}
-		overview.TotalReports++
-		critical, high, medium, low := extractSummaryCounts(report)
-		overview.SeverityTotals.Critical += critical
-		overview.SeverityTotals.High += high
-		overview.SeverityTotals.Medium += medium
-		overview.SeverityTotals.Low += low
-		breakdown := overview.ScanTypesBreakdown[report.Type]
-		breakdown.Scanned++
-		if critical > 0 || high > 0 || medium > 0 || low > 0 {
-			breakdown.Failed++
-		}
-		breakdown.Critical += critical
-		overview.ScanTypesBreakdown[report.Type] = breakdown
-		if critical == 0 && high == 0 {
-			continue
-		}
-		workloadKey := fmt.Sprintf("%s:%s:%s:%s", report.Cluster, report.Namespace, report.Type, report.Name)
-		if workloadScores[workloadKey] == nil {
-			workloadScores[workloadKey] = &WorkloadSummary{Cluster: report.Cluster, Namespace: report.Namespace, Name: report.Name, Type: report.Type}
-		}
-		workloadScores[workloadKey].Critical += critical
-		workloadScores[workloadKey].High += high
-		namespaceKey := fmt.Sprintf("%s:%s", report.Cluster, report.Namespace)
-		if nsScores[namespaceKey] == nil {
-			nsScores[namespaceKey] = &NamespaceSummary{Cluster: report.Cluster, Name: report.Namespace}
-		}
-		nsScores[namespaceKey].Critical += critical
-		nsScores[namespaceKey].High += high
-		if clusterScores[report.Cluster] == nil {
-			clusterScores[report.Cluster] = &ClusterSummary{Name: report.Cluster}
-		}
-		clusterScores[report.Cluster].Critical += critical
-		clusterScores[report.Cluster].High += high
-	}
-	for _, workload := range workloadScores {
-		overview.TopVulnerableWorkloads = append(overview.TopVulnerableWorkloads, *workload)
-	}
-	sort.Slice(overview.TopVulnerableWorkloads, func(i, j int) bool {
-		if overview.TopVulnerableWorkloads[i].Critical != overview.TopVulnerableWorkloads[j].Critical {
-			return overview.TopVulnerableWorkloads[i].Critical > overview.TopVulnerableWorkloads[j].Critical
-		}
-		return overview.TopVulnerableWorkloads[i].High > overview.TopVulnerableWorkloads[j].High
-	})
-	if len(overview.TopVulnerableWorkloads) > 5 {
-		overview.TopVulnerableWorkloads = overview.TopVulnerableWorkloads[:5]
-	}
+	overview := aggregateOverview(h.reportSummaries(), func(report Report) bool {
+		return (clusterFilter == "" || report.Cluster == clusterFilter) && scope.CanRead(report.Cluster, report.Namespace)
+	}, registryWorkloadResolver(h.clusterReg))
 	if clusterFilter == "" {
-		for _, cluster := range clusterScores {
-			overview.VulnerableClusters = append(overview.VulnerableClusters, *cluster)
-		}
+		overview.VulnerableNamespaces = []NamespaceSummary{}
 	} else {
-		for _, namespace := range nsScores {
-			overview.VulnerableNamespaces = append(overview.VulnerableNamespaces, *namespace)
-		}
+		overview.VulnerableClusters = []ClusterSummary{}
 	}
-	sort.Slice(overview.VulnerableClusters, func(i, j int) bool {
-		return overview.VulnerableClusters[i].Critical > overview.VulnerableClusters[j].Critical
-	})
-	sort.Slice(overview.VulnerableNamespaces, func(i, j int) bool {
-		return overview.VulnerableNamespaces[i].Critical > overview.VulnerableNamespaces[j].Critical
-	})
 	return overview
 }
 
@@ -1280,15 +1259,21 @@ func (h *Handler) getTrendsForScope(cluster string, days int, scope auth.AccessS
 	type trendKey struct {
 		bucket  time.Time
 		cluster string
+		kind    string
 	}
 	aggregates := make(map[trendKey]TrendRecord)
 	add := func(key trendKey, record TrendRecord) {
 		aggregate := aggregates[key]
 		aggregate.Timestamp = key.bucket
 		aggregate.Cluster = key.cluster
+		aggregate.Kind = key.kind
 		aggregate.Critical += record.Critical
 		aggregate.High += record.High
 		aggregate.Medium += record.Medium
+		aggregate.Low += record.Low
+		aggregate.Unknown += record.Unknown
+		aggregate.FixableCritical += record.FixableCritical
+		aggregate.FixableHigh += record.FixableHigh
 		aggregates[key] = aggregate
 	}
 	for _, record := range records {
@@ -1296,9 +1281,9 @@ func (h *Handler) getTrendsForScope(cluster string, days int, scope auth.AccessS
 			continue
 		}
 		bucket := record.Timestamp.UTC().Truncate(time.Hour)
-		add(trendKey{bucket: bucket, cluster: record.Cluster}, record)
+		add(trendKey{bucket: bucket, cluster: record.Cluster, kind: record.Kind}, record)
 		if cluster == "" {
-			add(trendKey{bucket: bucket}, record)
+			add(trendKey{bucket: bucket, kind: record.Kind}, record)
 		}
 	}
 
@@ -1322,8 +1307,14 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 	clusterFilter, namespaceFilters, page, pageSize := h.parseQueryParams(r)
 	search := r.URL.Query().Get("search")
 	onlyVulnerable := r.URL.Query().Get("onlyVulnerable") == "true"
+	sortMode := r.URL.Query().Get("sort")
+	if !ReportSortModes[sortMode] {
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "sort must be one of name, severity, fixable, scanned")
+		return
+	}
 
 	q := ReportQuery{
+		Sort:           sortMode,
 		Type:           typeName,
 		Cluster:        clusterFilter,
 		Namespaces:     namespaceFilters,
@@ -1349,7 +1340,7 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 			Page:                page,
 			PageSize:            pageSize,
 			HasNext:             page*pageSize < result.Total,
-			Data:                result.Items,
+			Data:                h.listItems(result.Items),
 		},
 	})
 }
