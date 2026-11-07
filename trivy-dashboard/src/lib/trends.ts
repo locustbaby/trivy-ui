@@ -11,8 +11,14 @@ export interface TrendSeries {
 
 export function vulnerabilityTrend(records: TrendRecord[]): TrendSeries {
   const current = records.filter((record) => record.kind === "vulnerabilities")
+  const legacy = records.filter((record) => !record.kind)
+  // A single new point draws no line; keep showing the older data until the
+  // hourly recorder has written a second one.
+  if (current.length < 2 && legacy.length > 0) {
+    return { records: legacy, legacy: true }
+  }
   if (current.length === 0) {
-    return { records, legacy: records.length > 0 }
+    return { records, legacy: false }
   }
   const hasLegacy = records.some((record) => !record.kind)
   return {
