@@ -283,7 +283,13 @@ function OverviewDashboardInternal({ selectedCluster, onSelectNamespace, onSelec
               ))}
             </div>
           </div>
-          <div className="h-[320px] w-full flex-1 min-h-[260px] min-w-0">
+          <div
+            className="h-[320px] w-full flex-1 min-h-[260px] min-w-0"
+            role="img"
+            aria-label={chartData.length
+              ? `Trend over ${days} days; latest: ${chartData[chartData.length - 1].critical} Critical, ${chartData[chartData.length - 1].high} High, ${chartData[chartData.length - 1].medium} Medium`
+              : "No trend data yet"}
+          >
             <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                 <defs>

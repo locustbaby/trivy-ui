@@ -139,15 +139,38 @@ export function ReportDetails({
     }
   }, [loadReport])
 
-  // Handle ESC key to close
+  const dialogRef = useRef<HTMLDivElement>(null)
+
+  // Dialog behaviour: focus moves into the dialog, Tab stays inside it, Escape
+  // closes it, and focus returns to where it was.
   useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null
+    dialogRef.current?.focus()
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         onClose()
+        return
+      }
+      if (e.key !== "Tab" || !dialogRef.current) return
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+      ).filter((element) => element.offsetParent !== null)
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
       }
     }
     window.addEventListener("keydown", handleKeyDown)
-    return () => window.removeEventListener("keydown", handleKeyDown)
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown)
+      previouslyFocused?.focus?.()
+    }
   }, [onClose])
 
   const handleCopyLink = useCallback(() => {
@@ -250,7 +273,13 @@ export function ReportDetails({
       onClick={onClose}
     >
       <div
-        className="relative w-full max-w-4xl max-h-[90vh] rounded-2xl border bg-card shadow-2xl overflow-hidden"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="report-details-title"
+        aria-describedby="report-details-name"
+        tabIndex={-1}
+        className="relative w-full max-w-4xl max-h-[90vh] rounded-2xl border bg-card shadow-2xl overflow-hidden focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -272,8 +301,8 @@ export function ReportDetails({
               </svg>
             </div>
             <div className="min-w-0">
-              <h2 className="text-base font-semibold leading-tight">{displayTypeName}</h2>
-              <p className="text-xs text-muted-foreground truncate max-w-[400px]">
+              <h2 id="report-details-title" className="text-base font-semibold leading-tight">{displayTypeName}</h2>
+              <p id="report-details-name" className="text-xs text-muted-foreground truncate max-w-[400px]">
                 {reportName}
               </p>
             </div>
@@ -294,7 +323,7 @@ export function ReportDetails({
                 )}
               </Button>
             )}
-            <Button onClick={onClose} variant="ghost" size="icon" className="rounded-full h-8 w-8">
+            <Button onClick={onClose} variant="ghost" size="icon" className="rounded-full h-8 w-8" aria-label="Close report details">
               <X className="h-4 w-4" />
             </Button>
           </div>

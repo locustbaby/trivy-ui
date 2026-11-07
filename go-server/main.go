@@ -30,8 +30,6 @@ import (
 	_ "trivy-ui/docs"
 	"trivy-ui/kubernetes"
 	"trivy-ui/utils"
-
-	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 type clusterInfo struct {
@@ -594,8 +592,6 @@ func main() {
 		Debug:              false,
 	})
 	utils.LogInfo("CORS handler created")
-
-	http.Handle("/swagger/", http.StripPrefix("/swagger/", httpSwagger.WrapHandler))
 
 	accessLogHandler := corsHandler.Handler(router)
 	httpHandler := api.CompressHandler(accessLogHandler)

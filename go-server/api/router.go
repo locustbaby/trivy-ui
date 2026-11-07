@@ -18,6 +18,7 @@ type Router struct {
 	mux       *http.ServeMux
 	handler   *Handler
 	errorPage *customErrorPage
+	csp       string
 }
 
 func NewRouter(k8sClient *kubernetes.Client, staticPath string, cache CacheService, clusterReg *ClusterRegistry, crdReg *config.CRDRegistry, authService *auth.Service, sourceScope *dataaccess.Policy) *Router {
@@ -25,6 +26,7 @@ func NewRouter(k8sClient *kubernetes.Client, staticPath string, cache CacheServi
 		mux:       http.NewServeMux(),
 		handler:   NewHandler(k8sClient, cache, clusterReg, NewQueryService(cache), crdReg, authService, sourceScope),
 		errorPage: newCustomErrorPage(os.Getenv("ERROR_PAGE_FILE")),
+		csp:       contentSecurityPolicy(),
 	}
 	r.Setup(staticPath)
 	return r
@@ -221,7 +223,10 @@ func (r *Router) Setup(staticPath string) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
 
-	r.mux.Handle("/swagger/", httpSwagger.WrapHandler)
+	// API docs and cache internals are for development; off unless enabled.
+	if envEnabled("ENABLE_SWAGGER") {
+		r.mux.Handle("/swagger/", httpSwagger.WrapHandler)
+	}
 
 	r.mux.HandleFunc("/api/v1/error-page", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet && req.Method != http.MethodOptions {
@@ -255,8 +260,9 @@ func (r *Router) Setup(staticPath string) {
 	// 就绪检查端点
 	r.mux.HandleFunc("/readyz", r.handler.ReadinessCheck)
 
-	// 缓存统计端点
-	r.mux.HandleFunc("/api/cache/stats", r.handler.GetCacheStats)
+	if envEnabled("ENABLE_CACHE_STATS") {
+		r.mux.HandleFunc("/api/cache/stats", r.handler.GetCacheStats)
+	}
 
 	r.mux.HandleFunc("/", SpaHandler(staticPath))
 
@@ -273,5 +279,5 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	} else {
 		handler = r.handler.AccessContextMiddleware(handler)
 	}
-	AccessLogHandler(handler).ServeHTTP(w, req)
+	AccessLogHandler(SecurityHeaders(r.csp, handler)).ServeHTTP(w, req)
 }

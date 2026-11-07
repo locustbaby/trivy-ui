@@ -18,9 +18,13 @@ function csvCell(value: unknown): string {
   return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe
 }
 
-export function downloadCSV(rows: Record<string, unknown>[], columns: string[], filename: string) {
+export function toCSV(rows: Record<string, unknown>[], columns: string[]): string {
   const lines = [columns.join(","), ...rows.map((row) => columns.map((column) => csvCell(row[column])).join(","))]
-  download(lines.join("\n") + "\n", filename, "text/csv;charset=utf-8")
+  return lines.join("\n") + "\n"
+}
+
+export function downloadCSV(rows: Record<string, unknown>[], columns: string[], filename: string) {
+  download(toCSV(rows, columns), filename, "text/csv;charset=utf-8")
 }
 
 export function downloadJSON(data: unknown, filename: string) {

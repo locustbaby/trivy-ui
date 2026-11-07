@@ -98,7 +98,11 @@ jobs:
         run: |
           npm ci
           npm run lint
-          npm audit --audit-level=high || true
+          npm test
+          # Fail on high/critical advisories in what ships in the image;
+          # dev-only tooling is reported but does not fail the build.
+          npm audit --omit=dev --audit-level=high
+          npm audit --audit-level=high || echo "::warning::npm audit found high/critical advisories in dev dependencies"
           npm run build
 
       - name: Validate Helm chart
