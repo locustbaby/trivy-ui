@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"trivy-ui/auth"
 	"trivy-ui/kubernetes"
 )
 
@@ -19,11 +18,6 @@ const (
 	familySecrets           = "secrets"
 	familyCompliance        = "compliance"
 )
-
-// TrendKindVulnerabilities marks trend records that count vulnerability
-// reports only. Records without a kind come from older versions, which added
-// up every report type.
-const TrendKindVulnerabilities = "vulnerabilities"
 
 func reportFamily(reportType string) string {
 	switch strings.ToLower(reportType) {
@@ -87,103 +81,8 @@ type FamilyOverview struct {
 	Compliance        ComplianceTotals `json:"compliance"`
 }
 
-type reportCounts struct {
-	critical, high, medium, low, unknown                                    int
-	fixableCritical, fixableHigh, fixableMedium, fixableLow, fixableUnknown int
-	compliancePass, complianceFail                                          int
-	hasCompliance                                                           bool
-}
-
 func (c reportCounts) any() bool {
 	return c.critical+c.high+c.medium+c.low+c.unknown > 0
-}
-
-func reportData(report Report) map[string]interface{} {
-	data, _ := report.Data.(map[string]interface{})
-	return data
-}
-
-func countReport(report Report) reportCounts {
-	var counts reportCounts
-	data := reportData(report)
-	if data == nil {
-		return counts
-	}
-	var summary map[string]interface{}
-	if body, ok := data["report"].(map[string]interface{}); ok {
-		summary, _ = body["summary"].(map[string]interface{})
-	}
-	if summary == nil {
-		summary, _ = data["summary"].(map[string]interface{})
-	}
-	if summary != nil {
-		counts.critical = intValue(summary["criticalCount"])
-		counts.high = intValue(summary["highCount"])
-		counts.medium = intValue(summary["mediumCount"])
-		counts.low = intValue(summary["lowCount"])
-		counts.unknown = intValue(summary["unknownCount"])
-	}
-	if derived, ok := data["derived"].(map[string]interface{}); ok {
-		if fixable, ok := derived["fixable"].(map[string]interface{}); ok {
-			counts.fixableCritical = intValue(fixable["critical"])
-			counts.fixableHigh = intValue(fixable["high"])
-			counts.fixableMedium = intValue(fixable["medium"])
-			counts.fixableLow = intValue(fixable["low"])
-			counts.fixableUnknown = intValue(fixable["unknown"])
-		}
-		if compliance, ok := derived["compliance"].(map[string]interface{}); ok {
-			counts.hasCompliance = true
-			counts.compliancePass = intValue(compliance["pass"])
-			counts.complianceFail = intValue(compliance["fail"])
-		}
-	}
-	return counts
-}
-
-func intValue(value interface{}) int {
-	switch number := value.(type) {
-	case float64:
-		return int(number)
-	case int:
-		return number
-	case int64:
-		return int(number)
-	case uint64:
-		return int(number)
-	}
-	return 0
-}
-
-// derivedVersion tells whether a cached summary already carries the derived
-// counts of the current version.
-func derivedVersion(report Report) int {
-	if data := reportData(report); data != nil {
-		if derived, ok := data["derived"].(map[string]interface{}); ok {
-			return intValue(derived["version"])
-		}
-	}
-	return 0
-}
-
-func reportLabels(report Report) map[string]string {
-	labels := map[string]string{}
-	data := reportData(report)
-	if data == nil {
-		return labels
-	}
-	metadata, _ := data["metadata"].(map[string]interface{})
-	raw, _ := metadata["labels"].(map[string]interface{})
-	for key, value := range raw {
-		if text, ok := value.(string); ok {
-			labels[key] = text
-		}
-	}
-	if typed, ok := metadata["labels"].(map[string]string); ok {
-		for key, value := range typed {
-			labels[key] = value
-		}
-	}
-	return labels
 }
 
 type workloadResolverFunc func(Report) kubernetes.Workload
@@ -353,48 +252,81 @@ func aggregateOverview(reports []Report, include func(Report) bool, resolve work
 	return overview
 }
 
-// vulnerabilityTrendRecords counts vulnerability reports (retired ReplicaSets
-// excluded) for the whole fleet, every cluster and every namespace scope.
-// scopes lists clusters and namespaces that get a record even when empty.
-func vulnerabilityTrendRecords(reports []Report, resolve workloadResolverFunc, scopes map[string]map[string]struct{}) []TrendRecord {
-	type scope struct{ cluster, namespace string }
-	totals := map[scope]*TrendRecord{{}: {}}
-	ensure := func(key scope) *TrendRecord {
-		if totals[key] == nil {
-			totals[key] = &TrendRecord{Cluster: key.cluster, Namespace: key.namespace}
-		}
-		return totals[key]
+func (c *Cache) GetOverviewData(clusterFilter string) *ClusterOverview {
+	overview := aggregateOverview(c.ReportSummaries(), func(report Report) bool {
+		return clusterFilter == "" || report.Cluster == clusterFilter
+	}, registryWorkloadResolver(GetDefaultRegistry()))
+	if clusterFilter == "" {
+		overview.VulnerableNamespaces = []NamespaceSummary{}
+	} else {
+		overview.VulnerableClusters = []ClusterSummary{}
 	}
-	for cluster, namespaces := range scopes {
-		ensure(scope{cluster: cluster})
-		for namespace := range namespaces {
-			ensure(scope{cluster: cluster, namespace: namespace})
-		}
-	}
-	for _, report := range reports {
-		if reportFamily(report.Type) != familyVulnerabilities || resolve(report).Retired {
-			continue
-		}
-		namespace := report.Namespace
-		if namespace == "" {
-			namespace = auth.ClusterScopedNamespace
-		}
-		counts := countReport(report)
-		for _, key := range []scope{{}, {cluster: report.Cluster}, {cluster: report.Cluster, namespace: namespace}} {
-			record := ensure(key)
-			record.Critical += counts.critical
-			record.High += counts.high
-			record.Medium += counts.medium
-			record.Low += counts.low
-			record.Unknown += counts.unknown
-			record.FixableCritical += counts.fixableCritical
-			record.FixableHigh += counts.fixableHigh
-		}
-	}
-	records := make([]TrendRecord, 0, len(totals))
-	for _, record := range totals {
-		record.Kind = TrendKindVulnerabilities
-		records = append(records, *record)
-	}
-	return records
+	return overview
+}
+
+// SeverityTotals adds up every report type (CVEs, misconfigurations, RBAC,
+// secrets). Kept for API compatibility; use ClusterOverview.Families.
+type SeverityTotals struct {
+	Critical int `json:"critical"`
+	High     int `json:"high"`
+	Medium   int `json:"medium"`
+	Low      int `json:"low"`
+	Unknown  int `json:"unknown"`
+}
+
+type TypeBreakdown struct {
+	Scanned      int `json:"scanned"`
+	WithFindings int `json:"with_findings"`
+	// Deprecated: same as WithFindings. The operator writes no report for a
+	// failed scan, so scan failures cannot be counted here.
+	Failed   int `json:"failed"`
+	Critical int `json:"critical"`
+}
+
+// WorkloadSummary is a workload (the Deployment behind a ReplicaSet, a
+// StatefulSet, ...) with the vulnerabilities of all its containers.
+type WorkloadSummary struct {
+	Cluster         string   `json:"cluster"`
+	Namespace       string   `json:"namespace"`
+	Name            string   `json:"name"`
+	Kind            string   `json:"kind,omitempty"`
+	Type            string   `json:"type"`
+	Critical        int      `json:"critical"`
+	High            int      `json:"high"`
+	FixableCritical int      `json:"fixable_critical"`
+	FixableHigh     int      `json:"fixable_high"`
+	Reports         []string `json:"reports,omitempty"`
+}
+
+type ClusterSummary struct {
+	Name            string `json:"name"`
+	Critical        int    `json:"critical"`
+	High            int    `json:"high"`
+	FixableCritical int    `json:"fixable_critical"`
+	FixableHigh     int    `json:"fixable_high"`
+}
+
+type NamespaceSummary struct {
+	Cluster         string `json:"cluster"`
+	Name            string `json:"name"`
+	Critical        int    `json:"critical"`
+	High            int    `json:"high"`
+	FixableCritical int    `json:"fixable_critical"`
+	FixableHigh     int    `json:"fixable_high"`
+}
+
+type ClusterOverview struct {
+	TotalReports   int            `json:"total_reports"`
+	SeverityTotals SeverityTotals `json:"severity_totals"`
+	Families       FamilyOverview `json:"families"`
+	RetiredReports int            `json:"retired_reports"`
+	// Reports not rescanned for longer than StaleAfterHours (SCAN_STALE_AFTER):
+	// the operator may not be scanning.
+	StaleReports       int                      `json:"stale_reports"`
+	StaleAfterHours    int                      `json:"stale_after_hours"`
+	ScanTypesBreakdown map[string]TypeBreakdown `json:"scan_types_breakdown"`
+	// Vulnerability reports only, grouped by workload.
+	TopVulnerableWorkloads []WorkloadSummary  `json:"top_vulnerable_workloads"`
+	VulnerableClusters     []ClusterSummary   `json:"vulnerable_clusters,omitempty"`
+	VulnerableNamespaces   []NamespaceSummary `json:"vulnerable_namespaces,omitempty"`
 }
