@@ -17,6 +17,7 @@ import {
   LayoutDashboard,
   GripVertical,
   Search,
+  Container,
 } from "lucide-react"
 import { cn, formatReportTypeName } from "@/lib/utils"
 import { Combobox } from "./combobox"
@@ -32,6 +33,17 @@ export interface SidebarProps {
   isSingleClusterMode?: boolean
   onSelectCluster?: (cluster: string) => void
   onSelectType?: (type: string) => void
+  selectedView?: string
+  onSelectView?: (view: string) => void
+}
+
+const VIEWS = [
+  { id: "cves", label: "Vulnerabilities", hint: "Each CVE once, where it is", icon: Bug },
+  { id: "images", label: "Images", hint: "Findings per image", icon: Container },
+] as const
+
+function formatCount(count: number): string {
+  return count >= 1000 ? `${(count / 1000).toFixed(count >= 10000 ? 0 : 1)}k` : String(count)
 }
 
 const DEFAULT_SIDEBAR_WIDTH = 280
@@ -90,6 +102,8 @@ export function Sidebar({
   isSingleClusterMode = false,
   onSelectCluster,
   onSelectType,
+  selectedView,
+  onSelectView,
 }: SidebarProps) {
   const [isDark, setIsDark] = useState(getInitialTheme)
   const [isCollapsed, setIsCollapsed] = useState(false)
@@ -97,6 +111,7 @@ export function Sidebar({
   const [sidebarWidth, setSidebarWidth] = useState(getInitialWidth)
   const [isResizing, setIsResizing] = useState(false)
   const [typeFilterQuery, setTypeFilterQuery] = useState("")
+  const [showEmptyTypes, setShowEmptyTypes] = useState(false)
   const isDraggingRef = useRef(false)
 
   useEffect(() => {
@@ -170,8 +185,17 @@ export function Sidebar({
     return a.name.localeCompare(b.name)
   }), [reportTypes])
 
+  // Types known to have no reports in this cluster (e.g. SBOM when SBOM
+  // generation is off) are folded away unless selected or searched for.
+  const emptyTypeCount = useMemo(
+    () => sortedReportTypes.filter((t) => reportCounts[t.name] === 0 && t.name !== selectedType).length,
+    [sortedReportTypes, reportCounts, selectedType],
+  )
+
   const filteredReportTypes = useMemo(() => {
-    if (!typeFilterQuery.trim()) return sortedReportTypes
+    if (!typeFilterQuery.trim()) {
+      return showEmptyTypes ? sortedReportTypes : sortedReportTypes.filter((t) => reportCounts[t.name] !== 0 || t.name === selectedType)
+    }
     const q = typeFilterQuery.toLowerCase().trim()
     return sortedReportTypes.filter(
       (t) =>
@@ -179,7 +203,7 @@ export function Sidebar({
         (t.kind && t.kind.toLowerCase().includes(q)) ||
         formatReportTypeName(t.kind || t.name).toLowerCase().includes(q)
     )
-  }, [sortedReportTypes, typeFilterQuery])
+  }, [sortedReportTypes, typeFilterQuery, showEmptyTypes, reportCounts, selectedType])
 
   const reportTypeOptions = useMemo(() => sortedReportTypes.map((t) => ({
     value: t.name,
@@ -264,17 +288,48 @@ export function Sidebar({
             className={cn(
               "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-all duration-200",
               isCollapsed && "justify-center px-2",
-              !selectedType
+              !selectedType && !selectedView
                 ? "bg-gradient-to-r from-primary to-primary/85 text-primary-foreground shadow-md shadow-primary/20 font-semibold"
                 : "hover:bg-muted/70 text-foreground/80 hover:text-foreground font-medium"
             )}
             title={isCollapsed ? "Cluster Overview" : undefined}
+            aria-current={!selectedType && !selectedView ? "page" : undefined}
           >
-            <div className={cn("p-1.5 rounded-lg", !selectedType ? "bg-white/20" : "bg-muted")}>
-              <LayoutDashboard className={cn("h-4 w-4", !selectedType ? "text-primary-foreground" : "text-primary")} />
+            <div className={cn("p-1.5 rounded-lg", !selectedType && !selectedView ? "bg-white/20" : "bg-muted")}>
+              <LayoutDashboard className={cn("h-4 w-4", !selectedType && !selectedView ? "text-primary-foreground" : "text-primary")} />
             </div>
             {!isCollapsed && <span className="flex-1 text-left truncate">Overview</span>}
           </button>
+          {onSelectView && (
+            <div className="mt-1 space-y-1">
+              {VIEWS.map((view) => {
+                const active = selectedView === view.id
+                return (
+                  <button
+                    key={view.id}
+                    onClick={() => {
+                      onSelectView(view.id)
+                      setIsMobileOpen(false)
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-all duration-200",
+                      isCollapsed && "justify-center px-2",
+                      active
+                        ? "bg-gradient-to-r from-primary to-primary/85 text-primary-foreground shadow-md shadow-primary/20 font-semibold"
+                        : "hover:bg-muted/70 text-foreground/80 hover:text-foreground font-medium"
+                    )}
+                    title={isCollapsed ? view.label : view.hint}
+                    aria-current={active ? "page" : undefined}
+                  >
+                    <div className={cn("p-1.5 rounded-lg", active ? "bg-white/20" : "bg-muted")}>
+                      <view.icon className={cn("h-4 w-4", active ? "text-primary-foreground" : "text-primary")} />
+                    </div>
+                    {!isCollapsed && <span className="flex-1 text-left truncate">{view.label}</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
 
         {/* Cluster Selection */}
@@ -396,7 +451,7 @@ export function Sidebar({
                             ? "bg-white/20 text-primary-foreground"
                             : "bg-primary/10 text-primary"
                         )}>
-                          {count > 99 ? "99+" : count}
+                          {formatCount(count)}
                         </span>
                       )}
                       {!type.namespaced && (
@@ -416,6 +471,15 @@ export function Sidebar({
             })}
             {filteredReportTypes.length === 0 && (
               <p className="px-2 py-3 text-center text-xs text-muted-foreground">No matching report types</p>
+            )}
+            {!isCollapsed && !typeFilterQuery.trim() && emptyTypeCount > 0 && (
+              <button
+                onClick={() => setShowEmptyTypes((value) => !value)}
+                className="w-full px-2.5 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+                aria-expanded={showEmptyTypes}
+              >
+                {showEmptyTypes ? "Hide types without reports" : `Show ${emptyTypeCount} type${emptyTypeCount === 1 ? "" : "s"} without reports`}
+              </button>
             )}
           </nav>
         </div>

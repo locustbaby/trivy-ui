@@ -30,8 +30,6 @@ import (
 	_ "trivy-ui/docs"
 	"trivy-ui/kubernetes"
 	"trivy-ui/utils"
-
-	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 type clusterInfo struct {
@@ -186,6 +184,14 @@ func main() {
 	if err != nil {
 		utils.LogError("Failed to initialize authentication", map[string]interface{}{"error": err.Error()})
 		os.Exit(1)
+	}
+	if raw := os.Getenv("SCAN_STALE_AFTER"); raw != "" {
+		age, err := time.ParseDuration(raw)
+		if err != nil || age <= 0 {
+			utils.LogError("Invalid SCAN_STALE_AFTER", map[string]interface{}{"value": raw})
+			os.Exit(1)
+		}
+		api.ConfigureScanStaleAfter(age)
 	}
 	sourceScope, err := dataaccess.NewFromEnv()
 	if err != nil {
@@ -586,8 +592,6 @@ func main() {
 		Debug:              false,
 	})
 	utils.LogInfo("CORS handler created")
-
-	http.Handle("/swagger/", http.StripPrefix("/swagger/", httpSwagger.WrapHandler))
 
 	accessLogHandler := corsHandler.Handler(router)
 	httpHandler := api.CompressHandler(accessLogHandler)

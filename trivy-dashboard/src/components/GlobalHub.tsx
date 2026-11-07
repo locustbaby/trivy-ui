@@ -1,6 +1,7 @@
 import * as React from "react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { api } from "../api/client"
+import { vulnerabilityTrend } from "../lib/trends"
 import type { ClusterOverview, TrendRecord, Cluster } from "../api/client"
 import {
   Shield,
@@ -48,12 +49,12 @@ function GlobalHubInternal({ clusters, onSelectCluster }: GlobalHubProps) {
         ])
         if (generation !== generationRef.current) return
         setGlobalData(ovData)
-        setGlobalTrends(trData.filter((point) => point.cluster === "" && !point.namespace))
+        setGlobalTrends(vulnerabilityTrend(trData.filter((point) => point.cluster === "" && !point.namespace)).records)
 
         if (generation === generationRef.current) {
           const trendsMap: Record<string, TrendRecord[]> = {}
           for (const clusterName of clustersRef.current.map((cluster) => cluster.name)) {
-            trendsMap[clusterName] = trData.filter((point) => point.cluster === clusterName && !point.namespace)
+            trendsMap[clusterName] = vulnerabilityTrend(trData.filter((point) => point.cluster === clusterName && !point.namespace)).records
           }
           if (generation === generationRef.current) setClusterTrends(trendsMap)
         }
@@ -119,6 +120,7 @@ function GlobalHubInternal({ clusters, onSelectCluster }: GlobalHubProps) {
   }
 
   if (!globalData) return null
+  const vulns = globalData.families?.vulnerabilities
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/20 overflow-y-auto scrollbar-thin">
@@ -147,15 +149,16 @@ function GlobalHubInternal({ clusters, onSelectCluster }: GlobalHubProps) {
         {/* Severity Totals Row */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label: "Critical", count: globalData.severity_totals.critical, icon: Shield, color: "text-red-500", bg: "bg-red-500/10 border-red-500/20" },
-            { label: "High", count: globalData.severity_totals.high, icon: AlertTriangle, color: "text-orange-500", bg: "bg-orange-500/10 border-orange-500/20" },
-            { label: "Medium", count: globalData.severity_totals.medium, icon: AlertCircle, color: "text-yellow-500", bg: "bg-yellow-500/10 border-yellow-500/20" },
-            { label: "Low", count: globalData.severity_totals.low, icon: Info, color: "text-blue-500", bg: "bg-blue-500/10 border-blue-500/20" }
+            { label: "Critical", count: vulns?.critical ?? globalData.severity_totals.critical, fixable: vulns?.fixable_critical, icon: Shield, color: "text-red-500", bg: "bg-red-500/10 border-red-500/20" },
+            { label: "High", count: vulns?.high ?? globalData.severity_totals.high, fixable: vulns?.fixable_high, icon: AlertTriangle, color: "text-orange-500", bg: "bg-orange-500/10 border-orange-500/20" },
+            { label: "Medium", count: vulns?.medium ?? globalData.severity_totals.medium, fixable: vulns?.fixable_medium, icon: AlertCircle, color: "text-yellow-500", bg: "bg-yellow-500/10 border-yellow-500/20" },
+            { label: "Low", count: vulns?.low ?? globalData.severity_totals.low, fixable: vulns?.fixable_low, icon: Info, color: "text-blue-500", bg: "bg-blue-500/10 border-blue-500/20" }
           ].map((sev, idx) => (
             <div key={idx} className={`p-4 rounded-2xl border ${sev.bg} flex items-center justify-between shadow-xs`}>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{sev.label}</p>
                 <h3 className={`text-2xl sm:text-3xl font-bold mt-1 tracking-tight ${sev.color}`}>{sev.count.toLocaleString()}</h3>
+                {sev.fixable !== undefined && <p className="text-xs text-muted-foreground mt-0.5">{sev.fixable.toLocaleString()} fixable</p>}
               </div>
               <div className="p-2.5 rounded-xl bg-background/50 border shadow-xs">
                 <sev.icon className={`h-5 w-5 ${sev.color}`} />
@@ -174,7 +177,7 @@ function GlobalHubInternal({ clusters, onSelectCluster }: GlobalHubProps) {
                   <Activity className="h-4 w-4 text-primary" />
                   Fleet Vulnerability Trend (30 Days)
                 </h3>
-                <p className="text-xs text-muted-foreground mt-0.5">Aggregated critical and high vulnerabilities across all clusters</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Critical and High vulnerabilities in container images across all clusters</p>
               </div>
             </div>
             <div className="h-[280px] w-full flex-1 min-h-[220px]">

@@ -1,11 +1,11 @@
 import * as React from "react"
 import { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import { useSearchParams } from "react-router-dom"
-import { api, CLUSTER_SCOPED_NAMESPACE, type Report, type ReportType } from "../api/client"
+import { api, CLUSTER_SCOPED_NAMESPACE, type Report, type ReportSort, type ReportType } from "../api/client"
 import { Button } from "./ui/button"
 import { MultiCombobox } from "./ui/multi-combobox"
 import { Search, Loader2, ArrowUp, Share2, Check, Shield, AlertTriangle, X, ChevronRight, CheckCircle2 } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { cn, scanAge } from "@/lib/utils"
 
 interface ReportsListProps {
   typeName: string
@@ -19,6 +19,18 @@ interface ReportsListProps {
 const PAGE_SIZE = 50
 const AUTO_REFRESH_INTERVAL = 15000
 const reportIdentity = (report: Report) => JSON.stringify([report.cluster, report.namespace, report.type, report.name])
+
+// Image reference and scan time from a report summary.
+function reportMeta(report: Report): { image?: string; scannedAt?: string } {
+  const data = report.data as { report?: { artifact?: { repository?: string; tag?: string }; registry?: { server?: string }; updateTimestamp?: string } } | undefined
+  const body = data?.report
+  const repository = body?.artifact?.repository
+  let image: string | undefined
+  if (repository) {
+    image = `${body?.registry?.server ? `${body.registry.server}/` : ""}${repository}${body?.artifact?.tag ? `:${body.artifact.tag}` : ""}`
+  }
+  return { image, scannedAt: body?.updateTimestamp }
+}
 
 function extractWorkloadKind(name: string): string | null {
   const lower = name.toLowerCase()
@@ -48,6 +60,7 @@ function ReportsListInternal({
   const urlNamespaces = searchParams.get("namespace")
   const urlSearch = searchParams.get("search") || ""
   const urlShowAll = searchParams.get("showAll") !== "false" // default true
+  const urlSort = (searchParams.get("sort") || "") as ReportSort
 
   // Parse URL namespaces once
   const urlNamespaceValues = useMemo(() => {
@@ -235,7 +248,8 @@ function ReportsListInternal({
         namespaceParams,
         urlSearch || undefined,
         !urlShowAll,
-        controller.signal
+        controller.signal,
+        urlSort || undefined
       )
       if (generation !== requestGenerationRef.current) return
       const responseData = Array.isArray(response.data) ? response.data : []
@@ -266,7 +280,7 @@ function ReportsListInternal({
         activeRequestRef.current = null
       }
     }
-  }, [typeName, selectedCluster, urlNamespaceValues, isNamespaced, urlSearch, urlShowAll, onTotalChange])
+  }, [typeName, selectedCluster, urlNamespaceValues, isNamespaced, urlSearch, urlShowAll, urlSort, onTotalChange])
 
   const refreshLoadedReports = useCallback(async () => {
     const pagesToRefresh = Math.max(1, page)
@@ -290,7 +304,8 @@ function ReportsListInternal({
           namespaceParams,
           urlSearch || undefined,
           !urlShowAll,
-          controller.signal
+          controller.signal,
+          urlSort || undefined
         ))
       )
       if (generation !== requestGenerationRef.current) return
@@ -325,7 +340,7 @@ function ReportsListInternal({
         activeRequestRef.current = null
       }
     }
-  }, [page, typeName, selectedCluster, urlNamespaceValues, isNamespaced, urlSearch, urlShowAll, onTotalChange])
+  }, [page, typeName, selectedCluster, urlNamespaceValues, isNamespaced, urlSearch, urlShowAll, urlSort, onTotalChange])
 
   // Fetch namespaces for the cluster
   const fetchNamespaces = useCallback(async (): Promise<string[]> => {
@@ -456,14 +471,14 @@ function ReportsListInternal({
     if (isFirstLoad.current) return
     if (!namespacesLoaded && isNamespaced) return
 
-    const filtersKey = `${urlNamespaces}-${urlSearch}-${urlShowAll}`
+    const filtersKey = `${urlNamespaces}-${urlSearch}-${urlShowAll}-${urlSort}`
     if (filtersKey !== prevFiltersRef.current) {
       prevFiltersRef.current = filtersKey
       setPage(1)
       setHasMore(false)
       fetchReports(1, true)
     }
-  }, [urlNamespaces, urlSearch, urlShowAll, namespacesLoaded, isNamespaced, fetchReports])
+  }, [urlNamespaces, urlSearch, urlShowAll, urlSort, namespacesLoaded, isNamespaced, fetchReports])
 
   const loadMore = useCallback(() => {
     if (!loadingMore && hasMore) {
@@ -546,11 +561,15 @@ function ReportsListInternal({
     }
 
     if (summary && typeof summary === "object") {
+      const derived = dataRecord.derived as { fixable?: Record<string, unknown> } | undefined
+      const fixable = derived?.fixable
       return {
         critical: Number(summary.criticalCount) || 0,
         high: Number(summary.highCount) || 0,
         medium: Number(summary.mediumCount) || 0,
         low: Number(summary.lowCount) || 0,
+        unknown: Number(summary.unknownCount) || 0,
+        fixableCriticalHigh: fixable ? (Number(fixable.critical) || 0) + (Number(fixable.high) || 0) : undefined,
       }
     }
     return null
@@ -662,6 +681,20 @@ function ReportsListInternal({
           </div>
         </div>
         <div className="flex items-stretch sm:items-end gap-2">
+          <div>
+            <label htmlFor="report-sort" className="mb-2 block text-sm font-medium text-muted-foreground">Sort</label>
+            <select
+              id="report-sort"
+              className="h-11 rounded-xl border bg-background px-3 text-sm"
+              value={urlSort}
+              onChange={(e) => updateUrlParams({ sort: e.target.value || null })}
+            >
+              <option value="">Name</option>
+              <option value="severity">Most severe first</option>
+              <option value="fixable">Most fixable first</option>
+              <option value="scanned">Oldest scan first</option>
+            </select>
+          </div>
           <Button
             onClick={() => handleShowAllChange(!urlShowAll)}
             variant={urlShowAll ? "outline" : "secondary"}
@@ -704,14 +737,28 @@ function ReportsListInternal({
             {filteredReports.map((report) => {
               const reportId = reportIdentity(report)
               const counts = getSummaryCounts(report)
-              const hasSeverity = counts && (counts.critical > 0 || counts.high > 0 || counts.medium > 0 || counts.low > 0)
-              const workloadKind = extractWorkloadKind(report.name)
+              const hasSeverity = counts && (counts.critical > 0 || counts.high > 0 || counts.medium > 0 || counts.low > 0 || counts.unknown > 0)
+              const workload = report.workload
+              // Show the workload (e.g. the Deployment) when it differs from the report name.
+              const workloadKind = workload?.kind || extractWorkloadKind(report.name)
+              const title = workload?.kind && workload.name ? workload.name : report.name
+              const { image, scannedAt } = reportMeta(report)
+              const age = scanAge(scannedAt ?? report.updated_at)
 
               return (
                 <div
                   key={reportId}
-                  className="group relative rounded-xl border bg-card p-4 transition-all duration-200 hover:shadow-lg hover:border-primary/30 hover:-translate-y-0.5 cursor-pointer"
+                  role="link"
+                  tabIndex={0}
+                  aria-label={`Open report ${report.name}`}
+                  className="group relative rounded-xl border bg-card p-4 transition-all duration-200 hover:shadow-lg hover:border-primary/30 hover:-translate-y-0.5 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                   onClick={() => onSelectReport(report)}
+                  onKeyDown={(e) => {
+                    if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                      e.preventDefault()
+                      onSelectReport(report)
+                    }
+                  }}
                 >
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex-1 min-w-0">
@@ -721,7 +768,18 @@ function ReportsListInternal({
                             {workloadKind}
                           </span>
                         )}
-                        <span className="font-semibold text-base truncate">{report.name}</span>
+                        <span className="font-semibold text-base truncate" title={report.name}>{title}</span>
+                        {title !== report.name && (
+                          <span className="text-xs text-muted-foreground truncate max-w-[18rem]" title={report.name}>{report.name}</span>
+                        )}
+                        {workload?.retired && (
+                          <span
+                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-muted text-muted-foreground border"
+                            title="Old ReplicaSet kept for rollback; not counted in the overview"
+                          >
+                            Retired
+                          </span>
+                        )}
                         {hasSeverity ? (
                           <div className="flex items-center gap-1.5">
                             {counts.critical > 0 && (
@@ -750,6 +808,18 @@ function ReportsListInternal({
                                 <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
                                 <span>{counts.low}</span>
                                 <span className="text-[9px] font-bold opacity-75">LOW</span>
+                              </span>
+                            )}
+                            {counts.unknown > 0 && (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 text-xs font-medium" title={`${counts.unknown} with no severity assigned yet`}>
+                                <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                                <span>{counts.unknown}</span>
+                                <span className="text-[9px] font-bold opacity-75">UNK</span>
+                              </span>
+                            )}
+                            {(counts.fixableCriticalHigh ?? 0) > 0 && (
+                              <span className="text-xs text-muted-foreground" title="Critical and High findings with a fixed version">
+                                {counts.fixableCriticalHigh} fixable
                               </span>
                             )}
                           </div>
@@ -793,12 +863,18 @@ function ReportsListInternal({
                             <span className={copiedField === `ns-${reportId}` ? "text-green-500" : ""}>{report.namespace}</span>
                           </button>
                         )}
-                        {report.updated_at && (
-                          <span className="inline-flex items-center gap-1">
-                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        {image && (
+                          <span className="font-mono text-xs truncate max-w-[22rem]" title={image}>{image}</span>
+                        )}
+                        {age && (
+                          <span
+                            className={cn("inline-flex items-center gap-1", age.stale && "text-amber-600 dark:text-amber-400")}
+                            title={scannedAt ? `Scanned ${new Date(scannedAt).toLocaleString()}` : undefined}
+                          >
+                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
-                            {new Date(report.updated_at).toLocaleString()}
+                            scanned {age.label}
                           </span>
                         )}
                       </div>

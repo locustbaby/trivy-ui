@@ -89,3 +89,15 @@ curl -s 'http://localhost:8080/api/v1/reports?type=vulnerabilityreports&pageSize
 When local authentication is enabled, send the session cookie returned by the
 login endpoint with protected API requests.
 
+
+## Security headers and debug endpoints
+
+- Every page and API response carries `X-Content-Type-Options`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+  `Cross-Origin-Opener-Policy` and a `Content-Security-Policy` that allows only
+  same-origin scripts and API calls. Set `CONTENT_SECURITY_POLICY` to replace
+  it (e.g. when the dashboard calls an API on another origin) or to `off` to
+  leave it to your proxy.
+- Swagger UI (`/swagger/`) and cache statistics (`/api/cache/stats`) are off
+  by default; enable them with `ENABLE_SWAGGER=true` / `ENABLE_CACHE_STATS=true`
+  (for example in development).

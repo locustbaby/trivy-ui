@@ -84,8 +84,10 @@ type Report struct {
 	Stale           bool        `json:"stale,omitempty"`
 	Data            interface{} `json:"data"`
 	Ref             ReportRef   `json:"ref"`
-	SortKey         string      `json:"-"`
-	UpdatedAt       time.Time   `json:"updated_at"`
+	// Workload the report belongs to (set in list responses).
+	Workload  *kubernetes.Workload `json:"workload,omitempty"`
+	SortKey   string               `json:"-"`
+	UpdatedAt time.Time            `json:"updated_at"`
 }
 
 type ReportRef struct {
@@ -126,59 +128,6 @@ func getReportDetailSingleflight(ctx context.Context, key string, fetch func() (
 	}()
 	report, err = fetch()
 	return report, err
-}
-
-type SeverityTotals struct {
-	Critical int `json:"critical"`
-	High     int `json:"high"`
-	Medium   int `json:"medium"`
-	Low      int `json:"low"`
-}
-
-type TypeBreakdown struct {
-	Scanned  int `json:"scanned"`
-	Failed   int `json:"failed"`
-	Critical int `json:"critical"`
-}
-
-type WorkloadSummary struct {
-	Cluster   string `json:"cluster"`
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	Critical  int    `json:"critical"`
-	High      int    `json:"high"`
-}
-
-type ClusterSummary struct {
-	Name     string `json:"name"`
-	Critical int    `json:"critical"`
-	High     int    `json:"high"`
-}
-
-type NamespaceSummary struct {
-	Cluster  string `json:"cluster"`
-	Name     string `json:"name"`
-	Critical int    `json:"critical"`
-	High     int    `json:"high"`
-}
-
-type ClusterOverview struct {
-	TotalReports           int                      `json:"total_reports"`
-	SeverityTotals         SeverityTotals           `json:"severity_totals"`
-	ScanTypesBreakdown     map[string]TypeBreakdown `json:"scan_types_breakdown"`
-	TopVulnerableWorkloads []WorkloadSummary        `json:"top_vulnerable_workloads"`
-	VulnerableClusters     []ClusterSummary         `json:"vulnerable_clusters,omitempty"`
-	VulnerableNamespaces   []NamespaceSummary       `json:"vulnerable_namespaces,omitempty"`
-}
-
-type TrendRecord struct {
-	Timestamp time.Time `json:"timestamp"`
-	Cluster   string    `json:"cluster"`
-	Namespace string    `json:"namespace,omitempty"`
-	Critical  int       `json:"critical"`
-	High      int       `json:"high"`
-	Medium    int       `json:"medium"`
 }
 
 type Handler struct {
@@ -875,7 +824,7 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 			Page:                page,
 			PageSize:            pageSize,
 			HasNext:             page*pageSize < result.Total,
-			Data:                result.Items,
+			Data:                h.listItems(result.Items),
 		},
 	})
 }
@@ -1042,274 +991,18 @@ func (h *Handler) GetReportDetailsV1(w http.ResponseWriter, r *http.Request, typ
 	h.getReportDetails(w, r, cluster, namespace, typeName, reportName, true)
 }
 
-func (h *Handler) GetOverview(w http.ResponseWriter, r *http.Request) {
-	cluster := r.URL.Query().Get("cluster")
-	overview := h.getOverviewForScopeCached(cluster, requestAuth(r).Access)
-	writeJSON(w, http.StatusOK, Response{
-		Code: CodeSuccess,
-		Data: overview,
-	})
-}
-
-func (h *Handler) GetOverviewTrends(w http.ResponseWriter, r *http.Request) {
-	cluster := r.URL.Query().Get("cluster")
-	daysStr := r.URL.Query().Get("days")
-	days := 30
-	if d, err := strconv.Atoi(daysStr); err == nil && d > 0 {
-		days = d
+// listItems adds the workload (owning Deployment, retired state) to list
+// items and leaves out the compact findings kept for the CVE view.
+func (h *Handler) listItems(reports []Report) []Report {
+	resolve := registryWorkloadResolver(h.clusterReg)
+	decorated := make([]Report, len(reports))
+	for i, report := range reports {
+		workload := resolve(report)
+		report.Workload = &workload
+		report.Data = withoutFindings(report.Data)
+		decorated[i] = report
 	}
-	if days > 90 {
-		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "days must be between 1 and 90")
-		return
-	}
-	trends := h.getTrendsForScope(cluster, days, requestAuth(r).Access)
-	if trends == nil {
-		trends = []TrendRecord{}
-	}
-	writeJSON(w, http.StatusOK, Response{
-		Code: CodeSuccess,
-		Data: trends,
-	})
-}
-
-// overviewMemo caches computed overviews keyed by cluster + access scope +
-// repository version. Overview is O(N) over all summaries and the dashboard
-// polls it every 15s per client; the memo collapses concurrent/repeated polls
-// into a single pass per cache generation. Short TTL keeps staleness bounded.
-//
-// Invariants:
-//   - Cached *ClusterOverview values are shared across concurrent requests and
-//     MUST be treated as immutable (handlers only serialize them).
-//   - The cache generation relies on every summary mutation going through
-//     Cache.Set/Delete (which bump typeVersions/repositoryVersion).
-type overviewMemoEntry struct {
-	overview  *ClusterOverview
-	expiresAt time.Time
-}
-
-var overviewMemo = struct {
-	mu      sync.Mutex
-	entries map[string]overviewMemoEntry
-}{entries: make(map[string]overviewMemoEntry)}
-
-const (
-	overviewMemoTTL      = 3 * time.Second
-	overviewMemoMaxItems = 64
-)
-
-var overviewMemoFlights sync.Map
-
-type overviewFlight struct {
-	done     chan struct{}
-	overview *ClusterOverview
-}
-
-func (h *Handler) emptyOverview() *ClusterOverview {
-	return &ClusterOverview{
-		SeverityTotals:         SeverityTotals{},
-		ScanTypesBreakdown:     make(map[string]TypeBreakdown),
-		TopVulnerableWorkloads: []WorkloadSummary{},
-		VulnerableClusters:     []ClusterSummary{},
-		VulnerableNamespaces:   []NamespaceSummary{},
-	}
-}
-
-func (h *Handler) getOverviewForScopeCached(clusterFilter string, scope auth.AccessSnapshot) *ClusterOverview {
-	// Unknown clusters cannot contain reports; skip both the O(N) scan and any
-	// memo insertion so unvalidated query params never grow the cache.
-	if clusterFilter != "" && h.clusterReg.Get(clusterFilter) == nil {
-		return h.emptyOverview()
-	}
-
-	key := fmt.Sprintf("%s\x00%s\x00%d", clusterFilter, scope.Fingerprint, getTypeVersion("", ""))
-	versionAtStart := getTypeVersion("", "")
-	now := time.Now()
-	overviewMemo.mu.Lock()
-	entry, ok := overviewMemo.entries[key]
-	if ok && now.After(entry.expiresAt) {
-		delete(overviewMemo.entries, key)
-		ok = false
-	}
-	overviewMemo.mu.Unlock()
-	if ok {
-		return entry.overview
-	}
-
-	// Singleflight: collapse concurrent misses for the same key into one scan.
-	flight := &overviewFlight{done: make(chan struct{})}
-	actual, loaded := overviewMemoFlights.LoadOrStore(key, flight)
-	if loaded {
-		leader := actual.(*overviewFlight)
-		select {
-		case <-leader.done:
-			return leader.overview
-		case <-time.After(overviewMemoTTL):
-			// Leader is taking abnormally long; fall back to computing locally.
-			return h.getOverviewForScope(clusterFilter, scope)
-		}
-	}
-	var result *ClusterOverview
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			utils.LogError("overview_compute_panic_recovered", map[string]interface{}{
-				"cluster": clusterFilter,
-				"error":   fmt.Sprint(recovered),
-				"stack":   string(debug.Stack()),
-			})
-			result = h.emptyOverview()
-		}
-		flight.overview = result
-		close(flight.done)
-		overviewMemoFlights.Delete(key)
-	}()
-
-	result = h.getOverviewForScope(clusterFilter, scope)
-
-	// TOCTOU guard: only memoize if the data version did not change while the
-	// O(N) scan was running.
-	if getTypeVersion("", "") == versionAtStart {
-		overviewMemo.mu.Lock()
-		if len(overviewMemo.entries) >= overviewMemoMaxItems {
-			for k, e := range overviewMemo.entries {
-				if time.Now().After(e.expiresAt) {
-					delete(overviewMemo.entries, k)
-				}
-			}
-		}
-		if len(overviewMemo.entries) >= overviewMemoMaxItems {
-			// Best-effort memo: dropping everything is safe and simpler than an LRU.
-			overviewMemo.entries = make(map[string]overviewMemoEntry)
-		}
-		overviewMemo.entries[key] = overviewMemoEntry{overview: result, expiresAt: time.Now().Add(overviewMemoTTL)}
-		overviewMemo.mu.Unlock()
-	}
-	return result
-}
-
-func (h *Handler) getOverviewForScope(clusterFilter string, scope auth.AccessSnapshot) *ClusterOverview {
-	overview := &ClusterOverview{
-		SeverityTotals:         SeverityTotals{},
-		ScanTypesBreakdown:     make(map[string]TypeBreakdown),
-		TopVulnerableWorkloads: []WorkloadSummary{},
-		VulnerableClusters:     []ClusterSummary{},
-		VulnerableNamespaces:   []NamespaceSummary{},
-	}
-	workloadScores := make(map[string]*WorkloadSummary)
-	nsScores := make(map[string]*NamespaceSummary)
-	clusterScores := make(map[string]*ClusterSummary)
-	for _, report := range h.reportSummaries() {
-		if clusterFilter != "" && report.Cluster != clusterFilter || !scope.CanRead(report.Cluster, report.Namespace) {
-			continue
-		}
-		overview.TotalReports++
-		critical, high, medium, low := extractSummaryCounts(report)
-		overview.SeverityTotals.Critical += critical
-		overview.SeverityTotals.High += high
-		overview.SeverityTotals.Medium += medium
-		overview.SeverityTotals.Low += low
-		breakdown := overview.ScanTypesBreakdown[report.Type]
-		breakdown.Scanned++
-		if critical > 0 || high > 0 || medium > 0 || low > 0 {
-			breakdown.Failed++
-		}
-		breakdown.Critical += critical
-		overview.ScanTypesBreakdown[report.Type] = breakdown
-		if critical == 0 && high == 0 {
-			continue
-		}
-		workloadKey := fmt.Sprintf("%s:%s:%s:%s", report.Cluster, report.Namespace, report.Type, report.Name)
-		if workloadScores[workloadKey] == nil {
-			workloadScores[workloadKey] = &WorkloadSummary{Cluster: report.Cluster, Namespace: report.Namespace, Name: report.Name, Type: report.Type}
-		}
-		workloadScores[workloadKey].Critical += critical
-		workloadScores[workloadKey].High += high
-		namespaceKey := fmt.Sprintf("%s:%s", report.Cluster, report.Namespace)
-		if nsScores[namespaceKey] == nil {
-			nsScores[namespaceKey] = &NamespaceSummary{Cluster: report.Cluster, Name: report.Namespace}
-		}
-		nsScores[namespaceKey].Critical += critical
-		nsScores[namespaceKey].High += high
-		if clusterScores[report.Cluster] == nil {
-			clusterScores[report.Cluster] = &ClusterSummary{Name: report.Cluster}
-		}
-		clusterScores[report.Cluster].Critical += critical
-		clusterScores[report.Cluster].High += high
-	}
-	for _, workload := range workloadScores {
-		overview.TopVulnerableWorkloads = append(overview.TopVulnerableWorkloads, *workload)
-	}
-	sort.Slice(overview.TopVulnerableWorkloads, func(i, j int) bool {
-		if overview.TopVulnerableWorkloads[i].Critical != overview.TopVulnerableWorkloads[j].Critical {
-			return overview.TopVulnerableWorkloads[i].Critical > overview.TopVulnerableWorkloads[j].Critical
-		}
-		return overview.TopVulnerableWorkloads[i].High > overview.TopVulnerableWorkloads[j].High
-	})
-	if len(overview.TopVulnerableWorkloads) > 5 {
-		overview.TopVulnerableWorkloads = overview.TopVulnerableWorkloads[:5]
-	}
-	if clusterFilter == "" {
-		for _, cluster := range clusterScores {
-			overview.VulnerableClusters = append(overview.VulnerableClusters, *cluster)
-		}
-	} else {
-		for _, namespace := range nsScores {
-			overview.VulnerableNamespaces = append(overview.VulnerableNamespaces, *namespace)
-		}
-	}
-	sort.Slice(overview.VulnerableClusters, func(i, j int) bool {
-		return overview.VulnerableClusters[i].Critical > overview.VulnerableClusters[j].Critical
-	})
-	sort.Slice(overview.VulnerableNamespaces, func(i, j int) bool {
-		return overview.VulnerableNamespaces[i].Critical > overview.VulnerableNamespaces[j].Critical
-	})
-	return overview
-}
-
-func (h *Handler) getTrendsForScope(cluster string, days int, scope auth.AccessSnapshot) []TrendRecord {
-	records := h.cache.GetTrends(cluster, days)
-	if scope.IsUnrestricted() {
-		filtered := make([]TrendRecord, 0, len(records))
-		for _, record := range records {
-			if record.Namespace == "" {
-				filtered = append(filtered, record)
-			}
-		}
-		return filtered
-	}
-
-	type trendKey struct {
-		bucket  time.Time
-		cluster string
-	}
-	aggregates := make(map[trendKey]TrendRecord)
-	add := func(key trendKey, record TrendRecord) {
-		aggregate := aggregates[key]
-		aggregate.Timestamp = key.bucket
-		aggregate.Cluster = key.cluster
-		aggregate.Critical += record.Critical
-		aggregate.High += record.High
-		aggregate.Medium += record.Medium
-		aggregates[key] = aggregate
-	}
-	for _, record := range records {
-		if record.Namespace == "" || !scope.CanRead(record.Cluster, record.Namespace) {
-			continue
-		}
-		bucket := record.Timestamp.UTC().Truncate(time.Hour)
-		add(trendKey{bucket: bucket, cluster: record.Cluster}, record)
-		if cluster == "" {
-			add(trendKey{bucket: bucket}, record)
-		}
-	}
-
-	filtered := make([]TrendRecord, 0, len(aggregates))
-	for _, record := range aggregates {
-		filtered = append(filtered, record)
-	}
-	sort.Slice(filtered, func(i, j int) bool {
-		return filtered[i].Timestamp.Before(filtered[j].Timestamp)
-	})
-	return filtered
+	return decorated
 }
 
 func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
@@ -1322,8 +1015,14 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 	clusterFilter, namespaceFilters, page, pageSize := h.parseQueryParams(r)
 	search := r.URL.Query().Get("search")
 	onlyVulnerable := r.URL.Query().Get("onlyVulnerable") == "true"
+	sortMode := r.URL.Query().Get("sort")
+	if !ReportSortModes[sortMode] {
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "sort must be one of name, severity, fixable, scanned")
+		return
+	}
 
 	q := ReportQuery{
+		Sort:           sortMode,
 		Type:           typeName,
 		Cluster:        clusterFilter,
 		Namespaces:     namespaceFilters,
@@ -1349,7 +1048,7 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 			Page:                page,
 			PageSize:            pageSize,
 			HasNext:             page*pageSize < result.Total,
-			Data:                result.Items,
+			Data:                h.listItems(result.Items),
 		},
 	})
 }
