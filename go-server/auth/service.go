@@ -14,6 +14,7 @@ type Service struct {
 	identity IdentityProvider
 	policy   PolicyProvider
 	session  SessionManager
+	proxy    *ProxyAuthenticator
 }
 
 type Config struct {
@@ -24,6 +25,7 @@ type Config struct {
 	SessionDuration time.Duration
 	CookieSecure    bool
 	CookieSameSite  string
+	Proxy           ProxyConfig
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -43,6 +45,11 @@ func ConfigFromEnv() (Config, error) {
 		SessionDuration: duration,
 		CookieSecure:    secure,
 		CookieSameSite:  getEnv("AUTH_COOKIE_SAME_SITE", "lax"),
+		Proxy: ProxyConfig{
+			UserHeader:   getEnv("AUTH_PROXY_USER_HEADER", "Remote-User"),
+			GroupsHeader: getEnv("AUTH_PROXY_GROUPS_HEADER", "Remote-Groups"),
+			TrustedCIDRs: os.Getenv("AUTH_PROXY_TRUSTED_CIDRS"),
+		},
 	}, nil
 }
 
@@ -50,6 +57,13 @@ func NewService(cfg Config) (*Service, error) {
 	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
 	if mode == "none" {
 		return &Service{mode: "none"}, nil
+	}
+	if mode == "proxy" {
+		proxy, err := NewProxyAuthenticator(cfg.Proxy)
+		if err != nil {
+			return nil, err
+		}
+		return &Service{mode: "proxy", proxy: proxy}, nil
 	}
 	if mode != "local" {
 		return nil, fmt.Errorf("unsupported auth mode %q", cfg.Mode)
@@ -71,6 +85,12 @@ func NewService(cfg Config) (*Service, error) {
 func (s *Service) Mode() string { return s.mode }
 
 func (s *Service) IsEnabled() bool { return s.mode != "none" }
+
+// IsProxy reports whether identities come from a trusted authenticating proxy
+// instead of a local session.
+func (s *Service) IsProxy() bool { return s.mode == "proxy" }
+
+func (s *Service) Proxy() *ProxyAuthenticator { return s.proxy }
 
 func (s *Service) Authenticate(ctx context.Context, username, password string) (Principal, error) {
 	if !s.IsEnabled() {

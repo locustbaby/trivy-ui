@@ -75,17 +75,18 @@ type Namespace struct {
 }
 
 type Report struct {
-	Type            string      `json:"type"`
-	Cluster         string      `json:"cluster"`
-	Namespace       string      `json:"namespace"`
-	Name            string      `json:"name"`
-	ResourceVersion string      `json:"resourceVersion,omitempty"`
-	Status          string      `json:"status,omitempty"`
-	Stale           bool        `json:"stale,omitempty"`
-	Data            interface{} `json:"data"`
-	Ref             ReportRef   `json:"ref"`
-	SortKey         string      `json:"-"`
-	UpdatedAt       time.Time   `json:"updated_at"`
+	Type            string       `json:"type"`
+	Cluster         string       `json:"cluster"`
+	Namespace       string       `json:"namespace"`
+	Name            string       `json:"name"`
+	ResourceVersion string       `json:"resourceVersion,omitempty"`
+	Status          string       `json:"status,omitempty"`
+	Stale           bool         `json:"stale,omitempty"`
+	Data            interface{}  `json:"data"`
+	Ref             ReportRef    `json:"ref"`
+	Rescan          *RescanState `json:"rescan,omitempty"`
+	SortKey         string       `json:"-"`
+	UpdatedAt       time.Time    `json:"updated_at"`
 }
 
 type ReportRef struct {
@@ -875,7 +876,7 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 			Page:                page,
 			PageSize:            pageSize,
 			HasNext:             page*pageSize < result.Total,
-			Data:                result.Items,
+			Data:                withRescanState(result.Items),
 		},
 	})
 }
@@ -927,6 +928,13 @@ func (h *Handler) getReportDetails(w http.ResponseWriter, r *http.Request, clust
 	}
 	if !requestAuth(r).Access.CanRead(cluster, namespace) {
 		writeError(w, r, http.StatusForbidden, ErrAccessDenied, "report access denied")
+		return
+	}
+
+	// While a rescan runs the report does not exist in Kubernetes; serve the
+	// last result marked as rescanning.
+	if held, ok := rescans.heldReport(reportKey(cluster, namespace, typeName, reportName)); ok {
+		writeJSON(w, http.StatusOK, Response{Code: CodeSuccess, Message: "Success", Data: ensureReportRef(held)})
 		return
 	}
 
@@ -1349,7 +1357,7 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 			Page:                page,
 			PageSize:            pageSize,
 			HasNext:             page*pageSize < result.Total,
-			Data:                result.Items,
+			Data:                withRescanState(result.Items),
 		},
 	})
 }

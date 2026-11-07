@@ -4,8 +4,11 @@ import { useSearchParams } from "react-router-dom"
 import { api, CLUSTER_SCOPED_NAMESPACE, type Report, type ReportType } from "../api/client"
 import { Button } from "./ui/button"
 import { MultiCombobox } from "./ui/multi-combobox"
-import { Search, Loader2, ArrowUp, Share2, Check, Shield, AlertTriangle, X, ChevronRight, CheckCircle2 } from "lucide-react"
+import { Search, Loader2, ArrowUp, Share2, Check, Shield, AlertTriangle, X, ChevronRight, CheckCircle2, RefreshCw } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { toast } from "../lib/toast"
+import { canRescanType, describeRescan, useRescanCapabilities } from "../lib/rescan"
+import { BulkRescanPanel } from "./BulkRescanPanel"
 
 interface ReportsListProps {
   typeName: string
@@ -71,6 +74,11 @@ function ReportsListInternal({
   const [copiedReportId, setCopiedReportId] = useState<string | null>(null)
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [namespacesLoaded, setNamespacesLoaded] = useState(false)
+  const [confirmRescanId, setConfirmRescanId] = useState<string | null>(null)
+  const [rescanSubmittingId, setRescanSubmittingId] = useState<string | null>(null)
+  const [showBulkRescan, setShowBulkRescan] = useState(false)
+  const rescanCapabilities = useRescanCapabilities()
+  const canRescan = canRescanType(rescanCapabilities, typeName)
   const observerTarget = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const isFirstLoad = useRef(true)
@@ -79,6 +87,10 @@ function ReportsListInternal({
 
   const reportType = reportTypes.find((t) => t.name === typeName)
   const isNamespaced = reportType?.namespaced ?? false
+  const bulkRescanNamespaces = useMemo(
+    () => (isNamespaced ? urlNamespaceValues.filter((ns) => ns !== "all") : []),
+    [isNamespaced, urlNamespaceValues],
+  )
 
   // Update URL params helper
   const updateUrlParams = useCallback((updates: Record<string, string | null>) => {
@@ -156,6 +168,26 @@ function ReportsListInternal({
         console.error("Failed to copy link:", err)
       })
   }, [])
+
+  const requestRescan = useCallback((report: Report, e: React.MouseEvent) => {
+    e.stopPropagation()
+    const reportId = reportIdentity(report)
+    if (confirmRescanId !== reportId) {
+      setConfirmRescanId(reportId)
+      return
+    }
+    setRescanSubmittingId(reportId)
+    api.rescanReport(report.cluster, report.namespace, report.type, report.name)
+      .then((result) => {
+        setReports((current) => current.map((item) => reportIdentity(item) === reportId ? { ...item, rescan: result.rescan } : item))
+        toast(`Rescan requested for ${report.name}.`, "info")
+      })
+      .catch((err) => toast(`Could not request a rescan: ${err instanceof Error ? err.message : "unknown error"}`, "error"))
+      .finally(() => {
+        setRescanSubmittingId(null)
+        setConfirmRescanId(null)
+      })
+  }, [confirmRescanId])
 
   const copyToClipboard = useCallback((text: string, fieldId: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -608,13 +640,39 @@ function ReportsListInternal({
             )}
           </p>
         </div>
+        <div className="flex items-center gap-2">
+        {canRescan && selectedCluster && (
+          <Button
+            onClick={() => setShowBulkRescan((open) => !open)}
+            variant="outline"
+            size="sm"
+            className="h-9 gap-2 px-3.5"
+            aria-expanded={showBulkRescan}
+            title="Scan the reports in the current filter again"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Rescan…
+          </Button>
+        )}
         <Button onClick={() => fetchReports(1, true)} variant="outline" size="sm" className="h-9 gap-2 px-3.5">
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
           Refresh
         </Button>
+        </div>
       </div>
+
+      {showBulkRescan && canRescan && selectedCluster && (
+        <BulkRescanPanel
+          cluster={selectedCluster}
+          typeName={typeName}
+          namespaces={bulkRescanNamespaces}
+          maxBulk={rescanCapabilities.maxBulk}
+          onClose={() => setShowBulkRescan(false)}
+          onRequested={() => void refreshLoadedReports()}
+        />
+      )}
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-end">
@@ -722,6 +780,15 @@ function ReportsListInternal({
                           </span>
                         )}
                         <span className="font-semibold text-base truncate">{report.name}</span>
+                        {report.rescan && (
+                          <span
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-sky-100 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 text-xs font-medium"
+                            title={describeRescan(report.rescan)}
+                          >
+                            <RefreshCw className="h-3 w-3 animate-spin" />
+                            Rescanning
+                          </span>
+                        )}
                         {hasSeverity ? (
                           <div className="flex items-center gap-1.5">
                             {counts.critical > 0 && (
@@ -805,6 +872,29 @@ function ReportsListInternal({
                     </div>
 
                     <div className="flex items-center gap-1 flex-shrink-0">
+                      {canRescan && !report.rescan && (
+                        confirmRescanId === reportId ? (
+                          <button
+                            onClick={(e) => requestRescan(report, e)}
+                            onBlur={() => setConfirmRescanId((current) => (current === reportId ? null : current))}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-primary text-primary-foreground text-xs font-medium"
+                            disabled={rescanSubmittingId === reportId}
+                            autoFocus
+                          >
+                            {rescanSubmittingId === reportId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                            Rescan now?
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => requestRescan(report, e)}
+                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground"
+                            title="Rescan this workload"
+                            aria-label={`Rescan ${report.name}`}
+                          >
+                            <RefreshCw className="h-4 w-4" />
+                          </button>
+                        )
+                      )}
                       {/* Share Button */}
                       <button
                         onClick={(e) => copyReportLink(report, e)}

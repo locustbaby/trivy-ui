@@ -35,6 +35,13 @@ func (h *Handler) authenticateRequest(r *http.Request) (RequestAuth, int) {
 	if h.auth == nil || !h.auth.IsEnabled() {
 		return RequestAuth{Principal: auth.Principal{Subject: "anonymous", Username: "anonymous"}, Access: h.accessSnapshot(auth.UnrestrictedScope())}, http.StatusOK
 	}
+	if h.auth.IsProxy() {
+		principal, scope, err := h.auth.Proxy().Authenticate(r)
+		if err != nil {
+			return RequestAuth{}, http.StatusUnauthorized
+		}
+		return RequestAuth{Principal: principal, Access: h.accessSnapshot(scope)}, http.StatusOK
+	}
 	session, err := h.auth.Session().Read(r)
 	if err != nil {
 		return RequestAuth{}, http.StatusUnauthorized
@@ -81,6 +88,10 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	markDeprecated(w, r, "/api/v1/auth/login")
 	if h.auth == nil || !h.auth.IsEnabled() {
 		writeJSON(w, http.StatusOK, Response{Code: CodeSuccess, Message: "Authentication disabled", Data: map[string]interface{}{"mode": "none"}})
+		return
+	}
+	if h.auth.IsProxy() {
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "sign-in is handled by the authenticating proxy")
 		return
 	}
 	var request struct {
@@ -170,6 +181,29 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestAuth, status := h.authenticateRequest(r)
+	if h.auth.IsProxy() {
+		if status != http.StatusOK {
+			writeJSON(w, http.StatusUnauthorized, Response{Code: CodeError, Message: "Authentication required", Data: map[string]interface{}{
+				"enabled":       true,
+				"mode":          "proxy",
+				"authenticated": false,
+				"provider":      "proxy",
+				"methods":       []string{},
+			}, Error: &APIError{Type: "AUTH_REQUIRED", RequestID: w.Header().Get("X-Request-ID")}})
+			return
+		}
+		auditFromRequest(r).username = requestAuth.Principal.Username
+		writeJSON(w, http.StatusOK, Response{Code: CodeSuccess, Message: "Authenticated", Data: map[string]interface{}{
+			"enabled":       true,
+			"mode":          "proxy",
+			"authenticated": true,
+			"provider":      "proxy",
+			"methods":       []string{},
+			"username":      requestAuth.Principal.Username,
+			"groups":        requestAuth.Principal.Groups,
+		}})
+		return
+	}
 	if status != http.StatusOK {
 		writeJSON(w, http.StatusUnauthorized, Response{Code: CodeError, Message: "Authentication required", Data: map[string]interface{}{
 			"enabled":       true,
