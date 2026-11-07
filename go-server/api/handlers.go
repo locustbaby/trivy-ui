@@ -182,10 +182,14 @@ type NamespaceSummary struct {
 }
 
 type ClusterOverview struct {
-	TotalReports       int                      `json:"total_reports"`
-	SeverityTotals     SeverityTotals           `json:"severity_totals"`
-	Families           FamilyOverview           `json:"families"`
-	RetiredReports     int                      `json:"retired_reports"`
+	TotalReports   int            `json:"total_reports"`
+	SeverityTotals SeverityTotals `json:"severity_totals"`
+	Families       FamilyOverview `json:"families"`
+	RetiredReports int            `json:"retired_reports"`
+	// Reports not rescanned for longer than StaleAfterHours (SCAN_STALE_AFTER):
+	// the operator may not be scanning.
+	StaleReports       int                      `json:"stale_reports"`
+	StaleAfterHours    int                      `json:"stale_after_hours"`
 	ScanTypesBreakdown map[string]TypeBreakdown `json:"scan_types_breakdown"`
 	// Vulnerability reports only, grouped by workload.
 	TopVulnerableWorkloads []WorkloadSummary  `json:"top_vulnerable_workloads"`
@@ -903,7 +907,7 @@ func (h *Handler) GetReportsByTypeV1(w http.ResponseWriter, r *http.Request, typ
 			Page:                page,
 			PageSize:            pageSize,
 			HasNext:             page*pageSize < result.Total,
-			Data:                h.withWorkloads(result.Items),
+			Data:                h.listItems(result.Items),
 		},
 	})
 }
@@ -1214,14 +1218,15 @@ func (h *Handler) getOverviewForScopeCached(clusterFilter string, scope auth.Acc
 	return result
 }
 
-// withWorkloads adds the workload (owning Deployment, retired state) to list
-// items.
-func (h *Handler) withWorkloads(reports []Report) []Report {
+// listItems adds the workload (owning Deployment, retired state) to list
+// items and leaves out the compact findings kept for the CVE view.
+func (h *Handler) listItems(reports []Report) []Report {
 	resolve := registryWorkloadResolver(h.clusterReg)
 	decorated := make([]Report, len(reports))
 	for i, report := range reports {
 		workload := resolve(report)
 		report.Workload = &workload
+		report.Data = withoutFindings(report.Data)
 		decorated[i] = report
 	}
 	return decorated
@@ -1302,8 +1307,14 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 	clusterFilter, namespaceFilters, page, pageSize := h.parseQueryParams(r)
 	search := r.URL.Query().Get("search")
 	onlyVulnerable := r.URL.Query().Get("onlyVulnerable") == "true"
+	sortMode := r.URL.Query().Get("sort")
+	if !ReportSortModes[sortMode] {
+		writeError(w, r, http.StatusBadRequest, ErrValidationFailed, "sort must be one of name, severity, fixable, scanned")
+		return
+	}
 
 	q := ReportQuery{
+		Sort:           sortMode,
 		Type:           typeName,
 		Cluster:        clusterFilter,
 		Namespaces:     namespaceFilters,
@@ -1329,7 +1340,7 @@ func (h *Handler) GetReportsV1(w http.ResponseWriter, r *http.Request) {
 			Page:                page,
 			PageSize:            pageSize,
 			HasNext:             page*pageSize < result.Total,
-			Data:                h.withWorkloads(result.Items),
+			Data:                h.listItems(result.Items),
 		},
 	})
 }

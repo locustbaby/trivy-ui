@@ -343,7 +343,7 @@ export function ReportDetails({
               )}
 
               {hasVulnerabilitiesType && (
-                <VulnerabilitySection vulnerabilities={vulnerabilities} />
+                <VulnerabilitySection vulnerabilities={vulnerabilities} reportName={reportName} />
               )}
 
               {checks.length > 0 && <ChecksSection checks={checks} />}

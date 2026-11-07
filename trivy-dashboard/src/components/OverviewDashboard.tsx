@@ -22,7 +22,7 @@ import {
 } from "lucide-react"
 import { Button } from "./ui/button"
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts"
-import { cn, formatReportTypeName } from "../lib/utils"
+import { cn, reportTypeLabel } from "../lib/utils"
 import { formatTrendLabel, vulnerabilityTrend } from "../lib/trends"
 
 interface OverviewDashboardProps {
@@ -31,6 +31,8 @@ interface OverviewDashboardProps {
   onSelectWorkload: (w: WorkloadSummary) => void
   onSelectCluster: (cluster: string) => void
   onSelectType?: (type: string) => void
+  onSelectView?: (view: string) => void
+  onShowStale?: () => void
 }
 
 function getBreakdownIcon(type: string) {
@@ -76,7 +78,7 @@ function namespaceLabel(name: string) {
   return name && name !== "_" ? name : "Cluster-scoped"
 }
 
-function OverviewDashboardInternal({ selectedCluster, onSelectNamespace, onSelectWorkload, onSelectCluster, onSelectType }: OverviewDashboardProps) {
+function OverviewDashboardInternal({ selectedCluster, onSelectNamespace, onSelectWorkload, onSelectCluster, onSelectType, onSelectView, onShowStale }: OverviewDashboardProps) {
   const [data, setData] = useState<ClusterOverview | null>(null)
   const [trends, setTrends] = useState<TrendRecord[]>([])
   const [days, setDays] = useState<number>(30)
@@ -158,14 +160,27 @@ function OverviewDashboardInternal({ selectedCluster, onSelectNamespace, onSelec
         <section aria-labelledby="vulnerability-totals" className="space-y-3">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 id="vulnerability-totals" className="text-base font-semibold">Vulnerabilities in container images</h2>
-            <button
-              onClick={() => onSelectType?.("vulnerabilityreports")}
-              className="text-xs text-muted-foreground hover:text-foreground"
-            >
-              {vulns.with_findings.toLocaleString()} of {vulns.reports.toLocaleString()} images affected
-              {(data.retired_reports ?? 0) > 0 && ` · ${data.retired_reports} reports of retired ReplicaSets not counted`}
-            </button>
+            <div className="flex flex-wrap items-baseline gap-3 text-xs">
+              <button onClick={() => onSelectType?.("vulnerabilityreports")} className="text-muted-foreground hover:text-foreground">
+                {vulns.with_findings.toLocaleString()} of {vulns.reports.toLocaleString()} images affected
+                {(data.retired_reports ?? 0) > 0 && ` · ${data.retired_reports} reports of retired ReplicaSets not counted`}
+              </button>
+              {onSelectView && (
+                <>
+                  <button onClick={() => onSelectView("cves")} className="font-medium text-primary hover:underline">By CVE →</button>
+                  <button onClick={() => onSelectView("images")} className="font-medium text-primary hover:underline">By image →</button>
+                </>
+              )}
+            </div>
           </div>
+          {(data.stale_reports ?? 0) > 0 && (
+            <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+              <span>
+                {data.stale_reports} report{data.stale_reports === 1 ? " was" : "s were"} not rescanned for more than {data.stale_after_hours ?? 72} hours — check that the Trivy Operator is scanning.
+              </span>
+              {onShowStale && <button onClick={onShowStale} className="font-medium underline">Show oldest scans</button>}
+            </div>
+          )}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             {SEVERITY_TILES.map((sev) => {
               const count = vulns[sev.key]
@@ -317,7 +332,7 @@ function OverviewDashboardInternal({ selectedCluster, onSelectNamespace, onSelec
               const passRate = stats.scanned > 0 ? Math.round(((stats.scanned - withFindings) / stats.scanned) * 100) : 100
               const isHealthy = passRate > 80
               const Icon = getBreakdownIcon(type)
-              const formattedName = formatReportTypeName(type)
+              const formattedName = reportTypeLabel(type)
               return (
                 <div key={type} className="p-2.5 rounded-xl border bg-background/50 hover:bg-muted/40 transition-colors">
                   <div className="flex items-center justify-between text-xs mb-1.5">

@@ -148,6 +148,8 @@ export interface ClusterOverview {
   severity_totals: SeverityTotals
   families?: FamilyOverview
   retired_reports?: number
+  stale_reports?: number
+  stale_after_hours?: number
   scan_types_breakdown: Record<string, TypeBreakdown>
   top_vulnerable_workloads: WorkloadSummary[]
   vulnerable_clusters?: ClusterSummary[]
@@ -168,6 +170,73 @@ export interface TrendRecord {
   unknown?: number
   fixable_critical?: number
   fixable_high?: number
+}
+
+export type ReportSort = "" | "severity" | "fixable" | "scanned"
+
+export interface VulnerabilityOccurrence {
+  cluster: string
+  namespace: string
+  workload: string
+  workload_kind?: string
+  report: string
+  report_type: string
+  image?: string
+  package: string
+  installed: string
+  fixed?: string
+}
+
+export interface VulnerabilityEntry {
+  id: string
+  severity: string
+  title?: string
+  fixable: boolean
+  workloads: number
+  images: number
+  packages: string[]
+  occurrences: VulnerabilityOccurrence[]
+}
+
+export interface VulnerabilityList {
+  total: number
+  truncated: boolean
+  indexed: boolean
+  items: VulnerabilityEntry[]
+}
+
+export interface ImageEntry {
+  image: string
+  digest?: string
+  critical: number
+  high: number
+  medium: number
+  low: number
+  unknown: number
+  fixable_critical: number
+  fixable_high: number
+  workloads: { cluster: string; namespace: string; kind?: string; name: string; report: ReportRef }[]
+  reports: ReportRef[]
+  scanned_at?: string
+}
+
+export interface ViewFilter {
+  cluster?: string
+  namespace?: string
+  search?: string
+  severity?: string
+  fixable?: boolean
+}
+
+function viewQuery(filter: ViewFilter): string {
+  const params = new URLSearchParams()
+  if (filter.cluster) params.set("cluster", filter.cluster)
+  if (filter.namespace) params.set("namespace", filter.namespace)
+  if (filter.search) params.set("search", filter.search)
+  if (filter.severity) params.set("severity", filter.severity)
+  if (filter.fixable) params.set("fixable", "true")
+  const query = params.toString()
+  return query ? `?${query}` : ""
 }
 
 export const CLUSTER_SCOPED_NAMESPACE = "_"
@@ -290,7 +359,8 @@ export const api = {
     namespace?: string,
     search?: string,
     onlyVulnerable?: boolean,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    sort?: ReportSort
   ): Promise<PaginatedResponse<Report>> => {
     const params = new URLSearchParams()
     if (page) params.set("page", page.toString())
@@ -299,6 +369,7 @@ export const api = {
     if (namespace) params.set("namespace", namespace)
     if (search) params.set("search", search)
     if (onlyVulnerable !== undefined) params.set("onlyVulnerable", onlyVulnerable.toString())
+    if (sort) params.set("sort", sort)
     const query = params.toString()
     const url = `/api/v1/reports?type=${encodeURIComponent(typeName)}${query ? `&${query}` : ""}`
     return fetchApi<PaginatedResponse<Report>>(url, signal)
@@ -315,4 +386,10 @@ export const api = {
     const url = `/api/v1/reports/${encodeURIComponent(cluster)}/${encodeURIComponent(typeName)}/${encodeURIComponent(namespaceSegment)}/${encodeURIComponent(reportName)}`
     return fetchApi<Report>(url, signal)
   },
+
+  getVulnerabilities: (filter: ViewFilter, signal?: AbortSignal): Promise<VulnerabilityList> =>
+    fetchApi<VulnerabilityList>(`/api/v1/vulnerabilities${viewQuery(filter)}`, signal),
+
+  getImages: (filter: ViewFilter, signal?: AbortSignal): Promise<{ total: number; items: ImageEntry[] }> =>
+    fetchApi<{ total: number; items: ImageEntry[] }>(`/api/v1/images${viewQuery(filter)}`, signal),
 }

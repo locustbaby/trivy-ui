@@ -1,10 +1,30 @@
 package kubernetes
 
-import "strings"
+import (
+	"os"
+	"strings"
+)
 
 // DerivedVersion is bumped whenever the derived summary changes shape, so
 // cached summaries from an older version are replaced on the next sync.
-const DerivedVersion = 1
+const DerivedVersion = 2
+
+// Findings are kept in compact form for the cluster-wide CVE and image views
+// (about 150 bytes each). CVE_INDEX=false turns this off for very large
+// clusters; those views are then empty.
+var keepFindings = os.Getenv("CVE_INDEX") != "false"
+
+const maxFindingTitle = 120
+
+// Finding fields, in order, of each entry in derived.findings.
+const (
+	FindingID = iota
+	FindingSeverity
+	FindingPackage
+	FindingInstalled
+	FindingFixed
+	FindingTitle
+)
 
 var severityKeys = []string{"critical", "high", "medium", "low", "unknown"}
 
@@ -20,6 +40,7 @@ func deriveSummary(obj map[string]interface{}) map[string]interface{} {
 	if body, ok := obj["report"].(map[string]interface{}); ok {
 		if vulnerabilities, ok := body["vulnerabilities"].([]interface{}); ok {
 			fixable := zeroSeverityCounts()
+			var findings []interface{}
 			unique := make(map[string]map[string]struct{}, len(severityKeys))
 			for _, key := range severityKeys {
 				unique[key] = make(map[string]struct{})
@@ -33,8 +54,19 @@ func deriveSummary(obj map[string]interface{}) map[string]interface{} {
 				if fixed, _ := vulnerability["fixedVersion"].(string); strings.TrimSpace(fixed) != "" {
 					fixable[severity]++
 				}
-				if id, _ := vulnerability["vulnerabilityID"].(string); id != "" {
+				id, _ := vulnerability["vulnerabilityID"].(string)
+				if id != "" {
 					unique[severity][id] = struct{}{}
+				}
+				if keepFindings && id != "" {
+					title, _ := vulnerability["title"].(string)
+					if len(title) > maxFindingTitle {
+						title = title[:maxFindingTitle]
+					}
+					findings = append(findings, []interface{}{
+						id, severity, stringValue(vulnerability["resource"]),
+						stringValue(vulnerability["installedVersion"]), strings.TrimSpace(stringValue(vulnerability["fixedVersion"])), title,
+					})
 				}
 			}
 			uniqueCounts := zeroSeverityCounts()
@@ -43,6 +75,9 @@ func deriveSummary(obj map[string]interface{}) map[string]interface{} {
 			}
 			derived["fixable"] = toInterfaceMap(fixable)
 			derived["unique"] = toInterfaceMap(uniqueCounts)
+			if keepFindings {
+				derived["findings"] = findings
+			}
 		}
 	}
 	if status, ok := obj["status"].(map[string]interface{}); ok {
@@ -80,6 +115,11 @@ func toInterfaceMap(counts map[string]int) map[string]interface{} {
 		result[key] = value
 	}
 	return result
+}
+
+func stringValue(value interface{}) string {
+	text, _ := value.(string)
+	return text
 }
 
 func numberValue(value interface{}) int {

@@ -72,6 +72,25 @@ critical RBAC finding gives a number nobody can act on:
 
 ---
 
+## Vulnerabilities and Images views
+
+Two cluster-wide views sit under **Overview** in the sidebar (also linked as
+*By CVE* / *By image* on the overview):
+
+- **Vulnerabilities**: every vulnerability once, sorted by severity, then
+  whether a fix exists, then how many workloads it affects. Filter by severity,
+  *Fixable only*, or search by CVE ID, title, package, workload or image. Expand
+  a row for the affected workloads, images and the upgrade (`installed → fixed`),
+  plus links to NVD / AVD / GitHub / Go / Debian advisories. Export the current
+  result as CSV (one row per affected package and workload) or JSON.
+- **Images**: each image once, however many workloads run it, with its
+  counts, how many Critical/High findings are fixable, when it was scanned and
+  the workloads using it (click to open the report). Export as CSV.
+
+Both follow the namespace filter in the URL (`namespace=`). They are built from
+compact findings kept in memory (`CVE_INDEX=false` turns this off for very large
+clusters; the views are then empty).
+
 ## Reports list and filtering
 
 ![Reports Dashboard](../images/user-guide/reports-dashboard.png)
@@ -81,7 +100,8 @@ Selecting any report type from the sidebar opens the paginated reports list:
 ### Filter bar controls
 1. **Namespace selector**: Multi-select dropdown to filter reports by one or more Kubernetes namespaces.
 2. **Search bar**: Real-time filtering matching report name, cluster name, namespace, or container image repository.
-3. **Issue toggle (`All` vs `Issues only`)**:
+3. **Sort**: by name, most severe first, most fixable first, or oldest scan first (kept in the URL).
+4. **Issue toggle (`All` vs `Issues only`)**:
    - `[ 🛡 All ]`: Shows all scanned reports, including clean components.
    - `[ ⚠️ Issues only ]`: Filters the list to show only reports containing one or more vulnerabilities or audit failures.
 
@@ -92,6 +112,8 @@ Each report card provides concise, actionable metadata:
 - **Severity indicators**: Compact level pills (`● 3 CRIT`, `● 10 HIGH`, `● 20 MED`, `● 5 LOW`, `● 40 UNK`) and how many Critical/High findings are fixable.
 - **Clean indicator**: Reports with zero security findings display a green `[ ✓ Clean ]` badge.
 - **Cluster & namespace shortcuts**: Click the cluster or namespace badge to copy its name to the clipboard.
+- **Image and scan time**: the scanned image, and when the operator last scanned it; scans older than 3 days are highlighted.
+- **Keyboard**: cards can be focused with Tab and opened with Enter.
 - **Share report link**: Hover over the card and click the share icon to copy the direct URL.
 - **Drill-down cue**: Click anywhere on the card to open the complete report detail drawer.
 
@@ -104,6 +126,9 @@ Each report card provides concise, actionable metadata:
 Clicking any report opens the comprehensive report detail drawer:
 
 
+- **Vulnerabilities**: filter by severity or *Fixable*, group *by severity* or
+  *by package* (packages with the most severe findings first), export CSV/JSON.
+  Large reports render 50 rows per group with *Show more*.
 - **Vulnerabilities tab**:
   - CVE ID (with primary link to NVD / vendor advisory).
   - Severity level badge (Critical, High, Medium, Low).

@@ -27,6 +27,14 @@ func TestDeriveSummaryCountsFixableAndUniquePerSeverity(t *testing.T) {
 	if derived["version"] != DerivedVersion {
 		t.Fatalf("version = %v", derived["version"])
 	}
+	findings := derived["findings"].([]interface{})
+	if len(findings) != 5 {
+		t.Fatalf("one compact finding per vulnerability with an ID, got %d", len(findings))
+	}
+	first := findings[0].([]interface{})
+	if first[FindingID] != "CVE-1" || first[FindingSeverity] != "critical" || first[FindingFixed] != "1.2" {
+		t.Fatalf("finding = %v", first)
+	}
 }
 
 func TestStripLargeFieldsKeepsDerivedAndSlimsCompliance(t *testing.T) {

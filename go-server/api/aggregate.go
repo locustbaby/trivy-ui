@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"trivy-ui/auth"
 	"trivy-ui/kubernetes"
@@ -226,6 +227,9 @@ func aggregateOverview(reports []Report, include func(Report) bool, resolve work
 	workloads := make(map[string]*WorkloadSummary)
 	namespaces := make(map[string]*NamespaceSummary)
 	clusters := make(map[string]*ClusterSummary)
+	staleAfter := currentScanStaleAfter()
+	overview.StaleAfterHours = int(staleAfter.Hours())
+	staleBefore := time.Now().Add(-staleAfter)
 
 	for _, report := range reports {
 		if include != nil && !include(report) {
@@ -237,6 +241,9 @@ func aggregateOverview(reports []Report, include func(Report) bool, resolve work
 			continue
 		}
 		counts := countReport(report)
+		if scanned, ok := reportScannedAt(report); ok && scanned.Before(staleBefore) {
+			overview.StaleReports++
+		}
 
 		overview.TotalReports++
 		overview.SeverityTotals.Critical += counts.critical

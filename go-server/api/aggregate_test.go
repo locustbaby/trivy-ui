@@ -26,7 +26,7 @@ func counts(critical, high, medium, low, unknown float64) map[string]interface{}
 }
 
 func fixable(critical, high int) map[string]interface{} {
-	return map[string]interface{}{"version": 1, "fixable": map[string]interface{}{"critical": critical, "high": high}}
+	return map[string]interface{}{"version": kubernetes.DerivedVersion, "fixable": map[string]interface{}{"critical": critical, "high": high}}
 }
 
 // Fixture: a Deployment with two containers, a retired ReplicaSet of the same
