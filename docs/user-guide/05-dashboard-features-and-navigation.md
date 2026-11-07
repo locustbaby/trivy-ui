@@ -42,21 +42,33 @@ Click the **Overview** button (`LayoutDashboard` icon) at the top of the sidebar
 
 When a cluster is selected, the main view defaults to the Cluster Overview dashboard:
 
-### Top severity metric cards
-Displays total vulnerability counts categorized into **Critical**, **High**, **Medium**, and **Low**:
-- Values are formatted with thousand separators (e.g. `1,579`).
-- Color-coded backgrounds and badges indicate severity volume at a glance.
+### Vulnerabilities and other findings
+Totals are shown per kind of finding, because adding a critical CVE to a
+critical RBAC finding gives a number nobody can act on:
+- **Vulnerabilities in container images**: **Critical**, **High**, **Medium**,
+  **Low** and **Unknown** (no severity assigned yet), each with how many have a
+  fixed version (*fixable*), and how many images are affected.
+- **Misconfigurations** (config audit and infra checks), **RBAC** and **Exposed
+  secrets**, each with Critical/High counts and how many resources have findings;
+  **Compliance** with passed and failed controls. Click a card to open the list.
+- Reports of **retired ReplicaSets** (old revisions scaled to zero, kept for
+  rollback) are not counted; the overview says how many were left out.
 
-### Equal-height trend and scan breakdown
-- **30-Day Trend Chart**: Responsive area chart plotting historical volume for Critical and High vulnerabilities over the last 30 days.
-- **Scan Breakdown Matrix**: Symmetrically aligned with the trend chart:
-  - Each report type is shown with its formatted title, semantic icon, pass rate badge, and progress bar.
-  - Displays total resources scanned versus resources with failures.
-  - Equipped with an independent scrollbar to keep layout proportions balanced regardless of how many CRD types exist.
+### Trend and scan breakdown
+- **Vulnerability trend**: Critical, High and Medium vulnerabilities, plus a
+  dashed line for Critical + High findings with a fix. Choose 7, 30 or 90 days.
+  Points recorded by versions before this change added up every report type;
+  they are hidden once vulnerability-only data exists.
+- **Scan breakdown**: per report type, how many resources were scanned and how
+  many have findings ("% clean").
 
-### Risk density and top vulnerable workloads
-- **Top Vulnerable Workloads**: Highlights the most vulnerable Kubernetes workloads (Pods, Deployments, ReplicaSets) sorted by Critical and High findings, with direct one-click navigation to the report.
-- **Namespace Risk Density / Leaderboard**: Ranks namespaces by vulnerability density to help operators prioritize remediation.
+### Top vulnerable workloads and namespaces
+- **Top Vulnerable Workloads**: vulnerability findings grouped by workload, so a
+  Deployment with three containers is one entry named after the Deployment (not
+  `replicaset-<name>-<hash>`), with how many are fixable. Click to open its
+  report, or the list of its containers' reports.
+- **Namespace Risk Density / Leaderboard**: namespaces (or clusters) ranked by
+  Critical and High vulnerabilities.
 
 ---
 
@@ -76,7 +88,8 @@ Selecting any report type from the sidebar opens the paginated reports list:
 ### Report cards
 Each report card provides concise, actionable metadata:
 - **Workload kind badge**: Extracted workload type (`[Service]`, `[ReplicaSet]`, `[Deployment]`, `[DaemonSet]`, `[CronJob]`, `[Pod]`).
-- **Severity indicators**: Compact level pills (`● 3 CRIT`, `● 10 HIGH`, `● 20 MED`, `● 5 LOW`).
+- **Workload name**: Reports of a ReplicaSet show the Deployment name, with the report name next to it. Old ReplicaSets kept for rollback are marked **Retired**.
+- **Severity indicators**: Compact level pills (`● 3 CRIT`, `● 10 HIGH`, `● 20 MED`, `● 5 LOW`, `● 40 UNK`) and how many Critical/High findings are fixable.
 - **Clean indicator**: Reports with zero security findings display a green `[ ✓ Clean ]` badge.
 - **Cluster & namespace shortcuts**: Click the cluster or namespace badge to copy its name to the clipboard.
 - **Share report link**: Hover over the card and click the share icon to copy the direct URL.
