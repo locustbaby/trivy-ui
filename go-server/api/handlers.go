@@ -358,19 +358,35 @@ func convertCacheValue[T any](v interface{}) (T, bool) {
 	return result, false
 }
 
+// SpaHandler serves the dashboard. Build assets under /assets/ have content
+// hashes in their names: they are cached for a year, and a missing one is a
+// stale reference from an older page, answered with 404 (index.html instead
+// would be loaded as a script and fail with a MIME type error). index.html and
+// every other route must be revalidated, so a deploy is picked up at once.
 func SpaHandler(staticPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.NotFound(w, r)
 			return
 		}
+		isAsset := strings.HasPrefix(r.URL.Path, "/assets/")
 		path := filepath.Join(staticPath, r.URL.Path)
-		_, err := os.Stat(path)
-		if err != nil {
-			http.ServeFile(w, r, filepath.Join(staticPath, "index.html"))
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			if isAsset {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				w.Header().Set("Cache-Control", "no-cache")
+			}
+			http.ServeFile(w, r, path)
 			return
 		}
-		http.ServeFile(w, r, path)
+		if isAsset {
+			w.Header().Set("Cache-Control", "no-store")
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, filepath.Join(staticPath, "index.html"))
 	}
 }
 
