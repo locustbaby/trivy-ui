@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,7 +38,9 @@ import (
 type clusterInfo struct {
 	Name       string
 	Kubeconfig string
-	InCluster  bool
+	// MountedKubeconfig is the file contents. Kubeconfig only locates relative references when this is set.
+	MountedKubeconfig []byte
+	InCluster         bool
 	// Context selects the kubeconfig context to use. Empty means current-context.
 	Context string
 }
@@ -125,23 +128,37 @@ func legacyDisplayName(contextName string) string {
 	return contextName
 }
 
-func mountedKubeconfigPath(dir, key string) (string, error) {
+func readMountedKubeconfig(dir, key string) ([]byte, error) {
 	if !filepath.IsLocal(key) || filepath.Base(key) != key {
-		return "", fmt.Errorf("kubeconfig key must name a file in the mounted Secret")
+		return nil, fmt.Errorf("kubeconfig key must name a file in the mounted Secret")
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer root.Close()
+	// Check before opening to avoid waiting on a named pipe. The opened file
+	// is checked again because the Secret projection can rotate between calls.
 	info, err := root.Stat(key)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("kubeconfig key must name a regular file")
+		return nil, fmt.Errorf("kubeconfig key must name a regular file")
 	}
-	return filepath.Join(dir, key), nil
+	file, err := root.Open(key)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("kubeconfig key must name a regular file")
+	}
+	return io.ReadAll(file)
 }
 
 func loadConfiguredClusters(dir string) ([]clusterInfo, error) {
@@ -173,16 +190,26 @@ func loadConfiguredClusters(dir string) ([]clusterInfo, error) {
 			if source.Key == "" {
 				return nil, fmt.Errorf("cluster %q requires a kubeconfig key", alias)
 			}
-			path, err := mountedKubeconfigPath(dir, source.Key)
+			data, err := readMountedKubeconfig(dir, source.Key)
 			if err != nil {
 				return nil, fmt.Errorf("cluster %q kubeconfig %q is not available: %w", alias, source.Key, err)
 			}
-			clusters = append(clusters, clusterInfo{Name: alias, Kubeconfig: path})
+			clusters = append(clusters, clusterInfo{Name: alias, Kubeconfig: filepath.Join(dir, source.Key), MountedKubeconfig: data})
 		default:
 			return nil, fmt.Errorf("cluster %q has unsupported source type %q", alias, source.Type)
 		}
 	}
 	return clusters, nil
+}
+
+func newKubernetesClient(cluster clusterInfo) (*kubernetes.Client, error) {
+	clientConfig := kubernetes.DefaultClientConfig()
+	clientConfig.UseInCluster = cluster.InCluster
+	clientConfig.Context = cluster.Context
+	if cluster.MountedKubeconfig != nil {
+		return kubernetes.NewClientFromKubeconfig(cluster.MountedKubeconfig, cluster.Kubeconfig, clientConfig)
+	}
+	return kubernetes.NewClientWithConfig(cluster.Kubeconfig, clientConfig)
 }
 
 func main() {
@@ -277,12 +304,12 @@ func main() {
 					if strings.HasPrefix(file.Name(), ".") {
 						continue
 					}
-					path, err := mountedKubeconfigPath(kubeconfigDir, file.Name())
+					data, err := readMountedKubeconfig(kubeconfigDir, file.Name())
 					if err != nil {
 						utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
 						continue
 					}
-					rawConfig, err := clientcmd.LoadFromFile(path)
+					rawConfig, err := clientcmd.Load(data)
 					if err != nil {
 						utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
 						continue
@@ -299,7 +326,10 @@ func main() {
 							utils.LogWarning("Skipping kubeconfig context with invalid legacy cluster alias", map[string]interface{}{"file": file.Name(), "cluster": displayName})
 							continue
 						}
-						clustersToInit = append(clustersToInit, clusterInfo{Name: displayName, Kubeconfig: path, Context: contextName})
+						clustersToInit = append(clustersToInit, clusterInfo{
+							Name: displayName, Kubeconfig: filepath.Join(kubeconfigDir, file.Name()),
+							MountedKubeconfig: data, Context: contextName,
+						})
 					}
 				}
 			}
@@ -355,13 +385,6 @@ func main() {
 	}
 	sourceScope.SetInitializedClusters(activeAliases)
 	api.PruneClusterCache(activeAliases)
-
-	newKubernetesClient := func(cluster clusterInfo) (*kubernetes.Client, error) {
-		clientConfig := kubernetes.DefaultClientConfig()
-		clientConfig.UseInCluster = cluster.InCluster
-		clientConfig.Context = cluster.Context
-		return kubernetes.NewClientWithConfig(cluster.Kubeconfig, clientConfig)
-	}
 
 	monitorCRDs := func(clusterName string, k8sClient *kubernetes.Client, registry *config.CRDRegistry) {
 		go func() {

@@ -103,7 +103,31 @@ func NewClientWithConfig(kubeconfig string, clientConfig ClientConfig) (*Client,
 	if err != nil {
 		return nil, err
 	}
+	return newClient(config, clientConfig)
+}
 
+// NewClientFromKubeconfig builds a client from an already-read kubeconfig.
+// The origin locates relative credential files referenced by the configuration.
+func NewClientFromKubeconfig(data []byte, origin string, clientConfig ClientConfig) (*Client, error) {
+	rawConfig, err := clientcmd.Load(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse kubeconfig %q: %w", origin, err)
+	}
+	base, err := filepath.Abs(filepath.Dir(origin))
+	if err != nil {
+		return nil, err
+	}
+	if err := clientcmd.ResolveConfigPaths(rawConfig, base); err != nil {
+		return nil, err
+	}
+	config, err := clientcmd.NewNonInteractiveClientConfig(*rawConfig, clientConfig.Context, &clientcmd.ConfigOverrides{}, nil).ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	return newClient(config, clientConfig)
+}
+
+func newClient(config *rest.Config, clientConfig ClientConfig) (*Client, error) {
 	// Apply rate limiting settings
 	// Note: We don't set config.Timeout globally as it breaks Watch (long-running connections)
 	// Individual requests should use context.WithTimeout instead
