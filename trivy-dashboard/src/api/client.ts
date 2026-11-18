@@ -133,19 +133,50 @@ export class ApiError extends Error {
   }
 }
 
+// Browsers cancel in-flight requests when the user navigates away (Firefox
+// rejects them with "NetworkError when attempting to fetch resource"), and
+// the rejection can surface once a back/forward-cached page is shown again.
+// Requests that were running when the page was left are reported as aborted,
+// which callers already ignore, instead of as failures.
+let pageLeftAt = -1
+if (typeof window !== "undefined") {
+  const markLeft = () => {
+    pageLeftAt = performance.now()
+  }
+  window.addEventListener("beforeunload", markLeft)
+  window.addEventListener("pagehide", markLeft)
+}
+
+export function wasInterruptedByNavigation(startedAt: number): boolean {
+  return pageLeftAt >= startedAt
+}
+
+function navigationAbortError(): DOMException {
+  return new DOMException("Request cancelled because the page was left", "AbortError")
+}
+
 async function fetchApi<T>(url: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${url}`, {
-    cache: "no-store",
-    signal,
-    credentials: "include",
-    headers: {
-      "Cache-Control": "no-cache",
-    },
-  })
-  const result: ApiResponse<T> = await response.json().catch(() => ({
-    code: 1,
-    message: `HTTP error! status: ${response.status}`,
-  }))
+  const startedAt = performance.now()
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}${url}`, {
+      cache: "no-store",
+      signal,
+      credentials: "include",
+      headers: {
+        "Cache-Control": "no-cache",
+      },
+    })
+  } catch (err) {
+    if (err instanceof TypeError && wasInterruptedByNavigation(startedAt)) {
+      throw navigationAbortError()
+    }
+    throw err
+  }
+  const result: ApiResponse<T> | undefined = await response.json().catch(() => undefined)
+  if (result === undefined && wasInterruptedByNavigation(startedAt)) {
+    throw navigationAbortError()
+  }
   if (!response.ok) {
     if (response.status === 401) {
       window.dispatchEvent(new CustomEvent("trivy-ui:auth-expired"))
@@ -154,10 +185,10 @@ async function fetchApi<T>(url: string, signal?: AbortSignal): Promise<T> {
     } else if (response.status === 503) {
       window.dispatchEvent(new CustomEvent("trivy-ui:service-unavailable"))
     }
-    throw new ApiError(response.status, result.message || `HTTP error! status: ${response.status}`, result.error?.type, result.error?.requestId)
+    throw new ApiError(response.status, result?.message || `HTTP error! status: ${response.status}`, result?.error?.type, result?.error?.requestId)
   }
-  if (result.code !== 0) {
-    throw new ApiError(response.status, result.message || "API error", result.error?.type, result.error?.requestId)
+  if (!result || result.code !== 0) {
+    throw new ApiError(response.status, result?.message || `HTTP error! status: ${response.status}`, result?.error?.type, result?.error?.requestId)
   }
   return result.data as T
 }
