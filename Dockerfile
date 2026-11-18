@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG GOLANG_VERSION=1.25-bookworm
+ARG GOLANG_VERSION=1.26-bookworm
 ARG NODE_VERSION=24-bookworm-slim
 ARG VERSION
 
