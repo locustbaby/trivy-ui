@@ -25,6 +25,7 @@ type Client struct {
 	dynamic   dynamic.Interface
 	config    *rest.Config
 	informer  *ReportInformerManager
+	workloads *WorkloadResolver
 }
 
 // ClientConfig holds configuration for K8s client
@@ -383,6 +384,7 @@ func (c *Client) StartInformerWithRegistry(clusterName string, cacheUpdater Cach
 		return nil
 	}
 	c.informer = NewReportInformerManagerWithRegistry(c, clusterName, cacheUpdater, registry)
+	c.StartWorkloadResolver(clusterName)
 	return c.informer.Start()
 }
 
@@ -397,6 +399,10 @@ func (c *Client) StopInformer() {
 	if c.informer != nil {
 		c.informer.Stop()
 		c.informer = nil
+	}
+	if c.workloads != nil {
+		c.workloads.Stop()
+		c.workloads = nil
 	}
 }
 

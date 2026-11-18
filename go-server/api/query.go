@@ -21,9 +21,11 @@ type ReportQuery struct {
 	Namespaces     []string
 	Search         string
 	OnlyVulnerable bool
-	Page           int
-	PageSize       int
-	Access         auth.AccessSnapshot
+	// Sort: "" (name), "severity", "fixable" or "scanned" (oldest scan first).
+	Sort     string
+	Page     int
+	PageSize int
+	Access   auth.AccessSnapshot
 }
 
 type QueryResult struct {
@@ -314,9 +316,7 @@ func (s *queryServiceImpl) buildIndex(q ReportQuery, generation uint64) SortedRe
 		}
 	}
 
-	sort.Slice(filteredReports, func(i, j int) bool {
-		return filteredReports[i].SortKey < filteredReports[j].SortKey
-	})
+	sortReports(filteredReports, q.Sort)
 	refs := make([]ReportRef, len(filteredReports))
 	for i, report := range filteredReports {
 		refs[i] = report.Ref
@@ -336,6 +336,7 @@ func refIndexCacheKey(q ReportQuery, generation uint64) string {
 		Namespaces     []string `json:"namespaces"`
 		Search         string   `json:"search"`
 		OnlyVulnerable bool     `json:"onlyVulnerable"`
+		Sort           string   `json:"sort"`
 		Access         string   `json:"access"`
 		Generation     uint64   `json:"generation"`
 	}{
@@ -344,6 +345,7 @@ func refIndexCacheKey(q ReportQuery, generation uint64) string {
 		Namespaces:     normalizeQueryValues(q.Namespaces),
 		Search:         strings.ToLower(q.Search),
 		OnlyVulnerable: q.OnlyVulnerable,
+		Sort:           q.Sort,
 		Access:         q.Access.Fingerprint,
 		Generation:     generation,
 	}
@@ -395,10 +397,68 @@ func paginateRefs(refs []ReportRef, page, pageSize int) []ReportRef {
 	return append([]ReportRef(nil), refs[start:end]...)
 }
 
+// ReportSortModes are the accepted values of the list "sort" parameter.
+var ReportSortModes = map[string]bool{"": true, "name": true, "severity": true, "fixable": true, "scanned": true}
+
+// sortReports orders reports by the requested mode; ties fall back to the
+// stable name order so pagination stays deterministic.
+func sortReports(reports []Report, mode string) {
+	type sortValues struct {
+		severity [5]int
+		fixable  int
+		scanned  time.Time
+	}
+	values := make(map[string]sortValues, len(reports))
+	if mode == "severity" || mode == "fixable" || mode == "scanned" {
+		for _, report := range reports {
+			counts := countReport(report)
+			scanned, _ := reportScannedAt(report)
+			values[report.SortKey] = sortValues{
+				severity: [5]int{counts.critical, counts.high, counts.medium, counts.low, counts.unknown},
+				fixable:  counts.fixableCritical + counts.fixableHigh,
+				scanned:  scanned,
+			}
+		}
+	}
+	moreSevere := func(a, b [5]int) int {
+		for i := range a {
+			if a[i] != b[i] {
+				if a[i] > b[i] {
+					return -1
+				}
+				return 1
+			}
+		}
+		return 0
+	}
+	sort.SliceStable(reports, func(i, j int) bool {
+		a, b := values[reports[i].SortKey], values[reports[j].SortKey]
+		switch mode {
+		case "severity":
+			if c := moreSevere(a.severity, b.severity); c != 0 {
+				return c < 0
+			}
+		case "fixable":
+			if a.fixable != b.fixable {
+				return a.fixable > b.fixable
+			}
+			if c := moreSevere(a.severity, b.severity); c != 0 {
+				return c < 0
+			}
+		case "scanned":
+			if !a.scanned.Equal(b.scanned) {
+				return a.scanned.Before(b.scanned)
+			}
+		}
+		return reports[i].SortKey < reports[j].SortKey
+	})
+}
+
 func reportMatchesSearch(report Report, searchLower string) bool {
 	if strings.Contains(strings.ToLower(report.Name), searchLower) ||
 		strings.Contains(strings.ToLower(report.Cluster), searchLower) ||
-		strings.Contains(strings.ToLower(report.Namespace), searchLower) {
+		strings.Contains(strings.ToLower(report.Namespace), searchLower) ||
+		strings.Contains(strings.ToLower(reportLabels(report)["trivy-operator.resource.name"]), searchLower) {
 		return true
 	}
 

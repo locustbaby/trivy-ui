@@ -42,23 +42,54 @@ Click the **Overview** button (`LayoutDashboard` icon) at the top of the sidebar
 
 When a cluster is selected, the main view defaults to the Cluster Overview dashboard:
 
-### Top severity metric cards
-Displays total vulnerability counts categorized into **Critical**, **High**, **Medium**, and **Low**:
-- Values are formatted with thousand separators (e.g. `1,579`).
-- Color-coded backgrounds and badges indicate severity volume at a glance.
+### Vulnerabilities and other findings
+Totals are shown per kind of finding, because adding a critical CVE to a
+critical RBAC finding gives a number nobody can act on:
+- **Vulnerabilities in container images**: **Critical**, **High**, **Medium**,
+  **Low** and **Unknown** (no severity assigned yet), each with how many have a
+  fixed version (*fixable*), and how many images are affected.
+- **Misconfigurations** (config audit and infra checks), **RBAC** and **Exposed
+  secrets**, each with Critical/High counts and how many resources have findings;
+  **Compliance** with passed and failed controls. Click a card to open the list.
+- Reports of **retired ReplicaSets** (old revisions scaled to zero, kept for
+  rollback) are not counted; the overview says how many were left out.
 
-### Equal-height trend and scan breakdown
-- **30-Day Trend Chart**: Responsive area chart plotting historical volume for Critical and High vulnerabilities over the last 30 days.
-- **Scan Breakdown Matrix**: Symmetrically aligned with the trend chart:
-  - Each report type is shown with its formatted title, semantic icon, pass rate badge, and progress bar.
-  - Displays total resources scanned versus resources with failures.
-  - Equipped with an independent scrollbar to keep layout proportions balanced regardless of how many CRD types exist.
+### Trend and scan breakdown
+- **Vulnerability trend**: Critical, High and Medium vulnerabilities, plus a
+  dashed line for Critical + High findings with a fix. Choose 7, 30 or 90 days.
+  Points recorded by versions before this change added up every report type;
+  they are hidden once vulnerability-only data exists.
+- **Scan breakdown**: per report type, how many resources were scanned and how
+  many have findings ("% clean").
 
-### Risk density and top vulnerable workloads
-- **Top Vulnerable Workloads**: Highlights the most vulnerable Kubernetes workloads (Pods, Deployments, ReplicaSets) sorted by Critical and High findings, with direct one-click navigation to the report.
-- **Namespace Risk Density / Leaderboard**: Ranks namespaces by vulnerability density to help operators prioritize remediation.
+### Top vulnerable workloads and namespaces
+- **Top Vulnerable Workloads**: vulnerability findings grouped by workload, so a
+  Deployment with three containers is one entry named after the Deployment (not
+  `replicaset-<name>-<hash>`), with how many are fixable. Click to open its
+  report, or the list of its containers' reports.
+- **Namespace Risk Density / Leaderboard**: namespaces (or clusters) ranked by
+  Critical and High vulnerabilities.
 
 ---
+
+## Vulnerabilities and Images views
+
+Two cluster-wide views sit under **Overview** in the sidebar (also linked as
+*By CVE* / *By image* on the overview):
+
+- **Vulnerabilities**: every vulnerability once, sorted by severity, then
+  whether a fix exists, then how many workloads it affects. Filter by severity,
+  *Fixable only*, or search by CVE ID, title, package, workload or image. Expand
+  a row for the affected workloads, images and the upgrade (`installed → fixed`),
+  plus links to NVD / AVD / GitHub / Go / Debian advisories. Export the current
+  result as CSV (one row per affected package and workload) or JSON.
+- **Images**: each image once, however many workloads run it, with its
+  counts, how many Critical/High findings are fixable, when it was scanned and
+  the workloads using it (click to open the report). Export as CSV.
+
+Both follow the namespace filter in the URL (`namespace=`). They are built from
+compact findings kept in memory (`CVE_INDEX=false` turns this off for very large
+clusters; the views are then empty).
 
 ## Reports list and filtering
 
@@ -69,16 +100,20 @@ Selecting any report type from the sidebar opens the paginated reports list:
 ### Filter bar controls
 1. **Namespace selector**: Multi-select dropdown to filter reports by one or more Kubernetes namespaces.
 2. **Search bar**: Real-time filtering matching report name, cluster name, namespace, or container image repository.
-3. **Issue toggle (`All` vs `Issues only`)**:
+3. **Sort**: by name, most severe first, most fixable first, or oldest scan first (kept in the URL).
+4. **Issue toggle (`All` vs `Issues only`)**:
    - `[ 🛡 All ]`: Shows all scanned reports, including clean components.
    - `[ ⚠️ Issues only ]`: Filters the list to show only reports containing one or more vulnerabilities or audit failures.
 
 ### Report cards
 Each report card provides concise, actionable metadata:
 - **Workload kind badge**: Extracted workload type (`[Service]`, `[ReplicaSet]`, `[Deployment]`, `[DaemonSet]`, `[CronJob]`, `[Pod]`).
-- **Severity indicators**: Compact level pills (`● 3 CRIT`, `● 10 HIGH`, `● 20 MED`, `● 5 LOW`).
+- **Workload name**: Reports of a ReplicaSet show the Deployment name, with the report name next to it. Old ReplicaSets kept for rollback are marked **Retired**.
+- **Severity indicators**: Compact level pills (`● 3 CRIT`, `● 10 HIGH`, `● 20 MED`, `● 5 LOW`, `● 40 UNK`) and how many Critical/High findings are fixable.
 - **Clean indicator**: Reports with zero security findings display a green `[ ✓ Clean ]` badge.
 - **Cluster & namespace shortcuts**: Click the cluster or namespace badge to copy its name to the clipboard.
+- **Image and scan time**: the scanned image, and when the operator last scanned it; scans older than 3 days are highlighted.
+- **Keyboard**: cards can be focused with Tab and opened with Enter.
 - **Share report link**: Hover over the card and click the share icon to copy the direct URL.
 - **Drill-down cue**: Click anywhere on the card to open the complete report detail drawer.
 
@@ -91,6 +126,9 @@ Each report card provides concise, actionable metadata:
 Clicking any report opens the comprehensive report detail drawer:
 
 
+- **Vulnerabilities**: filter by severity or *Fixable*, group *by severity* or
+  *by package* (packages with the most severe findings first), export CSV/JSON.
+  Large reports render 50 rows per group with *Show more*.
 - **Vulnerabilities tab**:
   - CVE ID (with primary link to NVD / vendor advisory).
   - Severity level badge (Critical, High, Medium, Low).

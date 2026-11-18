@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom"
 import { Sidebar } from "./ui/sidebar"
 import { Button } from "./ui/button"
 import { ReportsList } from "./ReportsList"
-import { api, ApiError, CLUSTER_SCOPED_NAMESPACE, type Report, type ReportType, type Cluster, type WorkloadSummary } from "../api/client"
+import { api, ApiError, CLUSTER_SCOPED_NAMESPACE, type Report, type ReportRef, type ReportType, type Cluster, type WorkloadSummary } from "../api/client"
 import { getCachedFresh, setCached } from "../lib/apiCache"
 import { toast } from "../lib/toast"
 import { CustomErrorPage } from "./CustomErrorPage"
@@ -12,6 +12,8 @@ import { LogOut, Shield, Loader2, AlertTriangle } from "lucide-react"
 const ReportDetails = lazy(() => import("./ReportDetails").then((module) => ({ default: module.ReportDetails })))
 const OverviewDashboard = lazy(() => import("./OverviewDashboard").then((module) => ({ default: module.OverviewDashboard })))
 const GlobalHub = lazy(() => import("./GlobalHub").then((module) => ({ default: module.GlobalHub })))
+const CveView = lazy(() => import("./CveView").then((module) => ({ default: module.CveView })))
+const ImagesView = lazy(() => import("./ImagesView").then((module) => ({ default: module.ImagesView })))
 
 const METADATA_REFRESH_INTERVAL = 30000
 const COUNTS_REFRESH_INTERVAL = 15000
@@ -50,6 +52,10 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
   // Get state from URL params
   const selectedCluster = searchParams.get("cluster") || undefined
   const selectedType = searchParams.get("type") || undefined
+  // Cluster-wide views (CVEs, images) instead of a report type list.
+  const selectedView = searchParams.get("view") || undefined
+  // A report opened from a view keeps its own type so the view stays.
+  const reportType = searchParams.get("reportType") || selectedType
   const isSingleClusterMode = clusters.length <= 1
   const searchParamsRef = useRef(searchParams)
   searchParamsRef.current = searchParams
@@ -91,10 +97,30 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
   const handleSelectType = useCallback((type: string) => {
     updateUrlParams({
       type,
+      view: null,
+      reportType: null,
       namespace: null,
       search: null,
+      sort: null,
       report: null,
       reportNamespace: null,
+    })
+  }, [updateUrlParams])
+
+  const handleSelectView = useCallback((view: string) => {
+    updateUrlParams({ view, type: null, reportType: null, search: null, sort: null, report: null, reportNamespace: null })
+  }, [updateUrlParams])
+
+  const handleShowStale = useCallback(() => {
+    updateUrlParams({ type: "vulnerabilityreports", view: null, sort: "scanned", namespace: null, search: null })
+  }, [updateUrlParams])
+
+  const handleOpenReport = useCallback((ref: ReportRef) => {
+    updateUrlParams({
+      cluster: ref.cluster,
+      reportType: ref.type,
+      report: ref.name,
+      reportNamespace: ref.namespace || CLUSTER_SCOPED_NAMESPACE,
     })
   }, [updateUrlParams])
 
@@ -123,7 +149,7 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
 
   useEffect(() => {
     const reportName = searchParams.get("report")
-    if (!reportName || !selectedType || !selectedCluster) {
+    if (!reportName || !reportType || !selectedCluster) {
       setSelectedReport(null)
       return
     }
@@ -134,7 +160,7 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
         : (reportNamespaceParam ?? searchParams.get("namespace") ?? "")
       if (
         current &&
-        current.type === selectedType &&
+        current.type === reportType &&
         current.cluster === selectedCluster &&
         current.name === reportName &&
         current.namespace === nextNamespace
@@ -142,14 +168,14 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
         return current
       }
       return {
-        type: selectedType,
+        type: reportType,
         cluster: selectedCluster,
         namespace: nextNamespace,
         name: reportName,
         data: {},
       }
     })
-  }, [searchParams, selectedCluster, selectedType])
+  }, [searchParams, selectedCluster, reportType])
 
   const fetchData = useCallback(async (cluster: string | undefined, silent: boolean = false) => {
     const generation = ++fetchGenerationRef.current
@@ -272,7 +298,7 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
 
   const handleCloseReportDetails = useCallback(() => {
     setSelectedReport(null)
-    updateUrlParams({ report: null, reportNamespace: null })
+    updateUrlParams({ report: null, reportNamespace: null, reportType: null })
   }, [updateUrlParams])
 
   const handleSelectNamespace = useCallback((ns: string) => {
@@ -280,16 +306,35 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
     updateUrlParams({ type: vulnerabilityType?.name ?? null, namespace: ns })
   }, [reportTypes, updateUrlParams])
 
+  // One container: open its report. Several: list the workload's reports.
   const handleSelectWorkload = useCallback((w: WorkloadSummary) => {
+    const reports = w.reports ?? [w.name]
+    if (reports.length === 1) {
+      updateUrlParams({
+        type: w.type,
+        report: reports[0],
+        reportNamespace: w.namespace || CLUSTER_SCOPED_NAMESPACE,
+        cluster: w.cluster,
+        namespace: null,
+        search: null,
+      })
+      return
+    }
     updateUrlParams({
       type: w.type,
-      report: w.name,
-      reportNamespace: w.namespace || CLUSTER_SCOPED_NAMESPACE,
       cluster: w.cluster,
-      namespace: null,
-      search: null,
+      namespace: w.namespace || null,
+      search: w.name,
+      report: null,
+      reportNamespace: null,
     })
   }, [updateUrlParams])
+
+  const handleSelectOverviewType = useCallback((type: string) => {
+    if (reportTypes.some((reportType) => reportType.name === type)) {
+      handleSelectType(type)
+    }
+  }, [reportTypes, handleSelectType])
 
   useEffect(() => {
     if (!selectedCluster) {
@@ -405,13 +450,16 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
         reportCounts={reportCounts}
         selectedCluster={selectedCluster}
         selectedType={selectedType}
+        selectedView={selectedView}
         isSingleClusterMode={isSingleClusterMode}
         onSelectCluster={handleSelectCluster}
         onSelectType={handleSelectType}
+        onSelectView={handleSelectView}
       />
       <main className="flex-1 overflow-y-auto p-6 bg-gradient-to-br from-background via-background to-muted/30 scrollbar-thin">
         <div className="mx-auto max-w-7xl">
-          <header className="mb-5">
+          {/* Room for the fixed menu button on small screens. */}
+          <header className="mb-5 pl-14 md:pl-0">
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div className="flex flex-wrap items-end gap-x-4 gap-y-1">
               <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-primary to-purple-600">
@@ -436,7 +484,13 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
               </div>
             </div>
           </header>
-          {selectedType ? (
+          {selectedView === "cves" || selectedView === "images" ? (
+            <Suspense fallback={<div className="flex h-[60vh] items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>}>
+              {selectedView === "cves"
+                ? <CveView cluster={selectedCluster} namespace={searchParams.get("namespace") || undefined} onOpenReport={handleOpenReport} />
+                : <ImagesView cluster={selectedCluster} namespace={searchParams.get("namespace") || undefined} onOpenReport={handleOpenReport} />}
+            </Suspense>
+          ) : selectedType ? (
             <ReportsList
                 typeName={selectedType}
                 reportTypes={reportTypes}
@@ -452,6 +506,9 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
                 onSelectNamespace={handleSelectNamespace}
                 onSelectWorkload={handleSelectWorkload}
                 onSelectCluster={handleSelectCluster}
+                onSelectType={handleSelectOverviewType}
+                onSelectView={handleSelectView}
+                onShowStale={handleShowStale}
               />
             </Suspense>
           )}
