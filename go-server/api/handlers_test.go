@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -409,5 +411,40 @@ func TestGetReportsV1_EnvelopeShape(t *testing.T) {
 	}
 	if strings.Contains(rec.Header().Get("Content-Type"), "json") == false {
 		t.Fatalf("content-type = %q", rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestSpaHandlerServesAssetsAndFallsBackToIndex(t *testing.T) {
+	dir := t.TempDir()
+	for name, contents := range map[string]string{"index.html": "dashboard", "asset.js": "asset"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := SpaHandler(dir)
+	for path, want := range map[string]string{"/": "dashboard", "/reports/default": "dashboard", "/asset.js": "asset"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusOK || rec.Body.String() != want {
+				t.Fatalf("status = %d, body = %q, want 200 with %q", rec.Code, rec.Body.String(), want)
+			}
+		})
+	}
+}
+
+func TestSpaHandlerRejectsSymlinkOutsideStaticRoot(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "fixture.txt")
+	if err := os.WriteFile(outside, []byte("outside static root"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, "asset.txt")); err != nil {
+		t.Skipf("cannot create fixture symlink: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	SpaHandler(dir).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/asset.txt", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }

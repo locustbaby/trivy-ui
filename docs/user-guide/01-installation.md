@@ -155,7 +155,7 @@ customErrorPage:
 ```
 
 ### Static HTML file escape hatch
-To provide an entirely custom HTML page, mount an HTML file and set `ERROR_PAGE_FILE`:
+To provide an entirely custom HTML page, mount an HTML file and set `ERROR_PAGE_FILE`. The dashboard displays it in a sandboxed frame with scripts and forms disabled.
 
 ```bash
 docker run -d \

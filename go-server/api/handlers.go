@@ -3,11 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -364,13 +365,30 @@ func SpaHandler(staticPath string) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		path := filepath.Join(staticPath, r.URL.Path)
-		_, err := os.Stat(path)
-		if err != nil {
-			http.ServeFile(w, r, filepath.Join(staticPath, "index.html"))
+		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if name == "" {
+			name = "index.html"
+		}
+		if !fs.ValidPath(name) {
+			http.NotFound(w, r)
 			return
 		}
-		http.ServeFile(w, r, path)
+		root, err := os.OpenRoot(staticPath)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer root.Close()
+
+		files := root.FS()
+		if _, err := fs.Stat(files, name); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				http.NotFound(w, r)
+				return
+			}
+			name = "index.html"
+		}
+		http.ServeFileFS(w, r, files, name)
 	}
 }
 

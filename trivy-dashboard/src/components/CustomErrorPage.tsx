@@ -50,12 +50,14 @@ export function ConfigErrorPage({ title, message, items }: { title: string; mess
 export function CustomErrorPageContent({ html }: { html: string }) {
   return (
     <div className="min-h-screen bg-background flex items-start sm:items-center justify-center p-4 sm:p-8 overflow-auto">
-      <div
-        className="w-full max-w-2xl rounded-2xl border bg-card shadow-xl p-6 [&_a]:text-primary [&_a]:underline [&_h1]:text-2xl [&_h1]:font-semibold [&_h1]:mb-3 [&_h2]:text-lg [&_h2]:font-semibold [&_p]:text-sm [&_p]:text-muted-foreground [&_ul]:list-disc [&_ul]:pl-5 [&_li]:text-sm"
+      <iframe
+        className="h-[70vh] w-full max-w-2xl rounded-2xl border bg-card shadow-xl"
+        title="Custom error page"
+        sandbox=""
+        referrerPolicy="no-referrer"
+        srcDoc={html}
         data-custom-error-page
-      >
-        <div dangerouslySetInnerHTML={{ __html: html }} />
-      </div>
+      />
     </div>
   )
 }
