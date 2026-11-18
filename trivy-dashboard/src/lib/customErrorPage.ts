@@ -7,8 +7,8 @@ import { API_BASE_URL } from "../api/client"
  * Two channels, checked in order:
  *  1. ERROR_PAGE_CONFIG (structured: title/message/contact items) served as
  *     JSON from /api/v1/error-page — rendered natively by the UI.
- *  2. ERROR_PAGE_FILE (raw operator-provided HTML) served at
- *     /error-page.html and displayed in a sandboxed iframe.
+ *  2. ERROR_PAGE_FILE served as JSON from /error-page.html and
+ *     displayed in a sandboxed iframe.
  *
  * When neither is configured, hooks resolve to `undefined` and callers fall
  * back to their built-in error UI.
@@ -55,8 +55,13 @@ function loadCustomErrorHtml(): Promise<string | null> {
   htmlPromise ??= fetch(`${API_BASE_URL}/error-page.html`, {
     cache: "no-store",
     credentials: "include",
+    headers: { Accept: "application/json" },
   })
-    .then((response) => (response.ok ? response.text() : null))
+    .then(async (response) => {
+      if (!response.ok) return null
+      const body = await response.json()
+      return typeof body?.html === "string" ? body.html : null
+    })
     .catch(() => null)
     .then((content) => {
       if (content === null) htmlPromise = null

@@ -125,6 +125,25 @@ func legacyDisplayName(contextName string) string {
 	return contextName
 }
 
+func mountedKubeconfigPath(dir, key string) (string, error) {
+	if !filepath.IsLocal(key) || filepath.Base(key) != key {
+		return "", fmt.Errorf("kubeconfig key must name a file in the mounted Secret")
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	info, err := root.Stat(key)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("kubeconfig key must name a regular file")
+	}
+	return filepath.Join(dir, key), nil
+}
+
 func loadConfiguredClusters(dir string) ([]clusterInfo, error) {
 	raw := strings.TrimSpace(os.Getenv("CLUSTER_SOURCES"))
 	if raw == "" {
@@ -154,11 +173,8 @@ func loadConfiguredClusters(dir string) ([]clusterInfo, error) {
 			if source.Key == "" {
 				return nil, fmt.Errorf("cluster %q requires a kubeconfig key", alias)
 			}
-			if filepath.Base(source.Key) != source.Key {
-				return nil, fmt.Errorf("cluster %q kubeconfig key must name a file in the mounted Secret", alias)
-			}
-			path := filepath.Join(dir, source.Key)
-			if _, err := os.Stat(path); err != nil {
+			path, err := mountedKubeconfigPath(dir, source.Key)
+			if err != nil {
 				return nil, fmt.Errorf("cluster %q kubeconfig %q is not available: %w", alias, source.Key, err)
 			}
 			clusters = append(clusters, clusterInfo{Name: alias, Kubeconfig: path})
@@ -261,7 +277,11 @@ func main() {
 					if strings.HasPrefix(file.Name(), ".") {
 						continue
 					}
-					path := filepath.Join(kubeconfigDir, file.Name())
+					path, err := mountedKubeconfigPath(kubeconfigDir, file.Name())
+					if err != nil {
+						utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})
+						continue
+					}
 					rawConfig, err := clientcmd.LoadFromFile(path)
 					if err != nil {
 						utils.LogInfo("Skipping kubeconfig file", map[string]interface{}{"file": file.Name(), "error": err.Error()})

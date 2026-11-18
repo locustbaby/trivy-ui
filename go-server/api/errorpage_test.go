@@ -37,7 +37,7 @@ func TestCustomErrorPageServesAndHotReloads(t *testing.T) {
 	if csp := rec.Header().Get("Content-Security-Policy"); !strings.HasPrefix(csp, "sandbox;") {
 		t.Fatalf("custom HTML response must be sandboxed, CSP = %q", csp)
 	}
-	if rec.Body.String() != "<h1>v1</h1>" {
+	if body := rec.Body.String(); !strings.Contains(body, `sandbox referrerpolicy="no-referrer" srcdoc="&lt;h1&gt;v1&lt;/h1&gt;"`) || strings.Contains(body, "<h1>") {
 		t.Fatalf("body = %q", rec.Body.String())
 	}
 
@@ -48,8 +48,27 @@ func TestCustomErrorPageServesAndHotReloads(t *testing.T) {
 	os.Chtimes(path, time.Now().Add(time.Second), time.Now().Add(time.Second))
 	rec = httptest.NewRecorder()
 	page.handler(rec, httptest.NewRequest(http.MethodGet, "/error-page.html", nil))
-	if rec.Body.String() != "<h1>v2 contact ops</h1>" {
+	if !strings.Contains(rec.Body.String(), `srcdoc="&lt;h1&gt;v2 contact ops&lt;/h1&gt;"`) {
 		t.Fatalf("hot reload failed, body = %q", rec.Body.String())
+	}
+}
+
+func TestCustomErrorPageNegotiatesJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "error.html")
+	const markup = `<h1 title="Ops">Contact support &amp; status</h1>`
+	if err := os.WriteFile(path, []byte(markup), 0600); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/error-page.html", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	newCustomErrorPage(path).handler(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json; charset=utf-8" || rec.Header().Get("Vary") != "Accept" {
+		t.Fatalf("unexpected response: %d, headers %v", rec.Code, rec.Header())
+	}
+	var body struct{ HTML string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.HTML != markup {
+		t.Fatalf("unexpected JSON custom page: %q, %v", rec.Body.String(), err)
 	}
 }
 

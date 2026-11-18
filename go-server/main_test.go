@@ -1,10 +1,41 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"trivy-ui/auth"
 )
+
+func TestMountedKubeconfigPathConfinesSecretFiles(t *testing.T) {
+	dir := t.TempDir()
+	data := filepath.Join(dir, "..data")
+	if err := os.Mkdir(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "cluster.yaml"), []byte("apiVersion: v1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "cluster.yaml"), filepath.Join(dir, "cluster.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.yaml")
+	if err := os.WriteFile(outside, []byte("apiVersion: v1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "outside.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := mountedKubeconfigPath(dir, "cluster.yaml"); err != nil || got != filepath.Join(dir, "cluster.yaml") {
+		t.Fatalf("projected Secret file = %q, %v", got, err)
+	}
+	for _, key := range []string{".", "..", "outside.yaml", "..data"} {
+		if _, err := mountedKubeconfigPath(dir, key); err == nil {
+			t.Errorf("accepted invalid kubeconfig key %q", key)
+		}
+	}
+}
 
 func TestCORSSettingsFromEnv(t *testing.T) {
 	t.Setenv("CORS_ALLOWED_ORIGINS", " https://dashboard.example.com, https://admin.example.com ")

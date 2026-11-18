@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/url"
 	"os"
@@ -137,6 +138,14 @@ type customErrorPage struct {
 	size    int64
 }
 
+var errorPageFrame = template.Must(template.New("error-page").Parse(`<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Custom error page</title></head>
+<body style="margin:0">
+<iframe title="Custom error page" sandbox referrerpolicy="no-referrer" srcdoc="{{.}}"
+    style="display:block;border:0;width:100%;height:100vh"></iframe>
+</body></html>`))
+
 func newCustomErrorPage(path string) *customErrorPage {
 	if path == "" {
 		return nil
@@ -205,13 +214,20 @@ func (c *customErrorPage) handler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "sandbox; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
 	// Hot-reloadable: never let intermediaries or the browser pin a version.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(content)
+	w.Header().Add("Vary", "Accept")
+	if r.Header.Get("Accept") == "application/json" {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]string{"html": string(content)})
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "sandbox; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
+	if r.Method == http.MethodGet {
+		_ = errorPageFrame.Execute(w, string(content))
 	}
 }

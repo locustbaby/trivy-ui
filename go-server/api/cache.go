@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -662,14 +664,10 @@ func (c *Cache) HasCacheData() bool {
 }
 
 func (c *Cache) LoadFromFile() error {
-	if _, err := os.Stat(c.cacheFile); os.IsNotExist(err) {
+	data, err := readCacheSnapshot(c.cacheFile, c.snapshotMaxSize)
+	if os.IsNotExist(err) {
 		return nil
 	}
-	if err := os.Chmod(c.cacheFile, 0600); err != nil {
-		return fmt.Errorf("failed to secure cache file: %w", err)
-	}
-
-	data, err := os.ReadFile(c.cacheFile)
 	if err != nil {
 		return fmt.Errorf("failed to read cache file: %w", err)
 	}
@@ -772,13 +770,10 @@ type trendSnapshot struct {
 }
 
 func (c *Cache) LoadDetailFromFile() error {
-	if _, err := os.Stat(c.detailFile); os.IsNotExist(err) {
+	data, err := readCacheSnapshot(c.detailFile, c.detailMaxSize)
+	if os.IsNotExist(err) {
 		return nil
 	}
-	if err := os.Chmod(c.detailFile, 0600); err != nil {
-		return fmt.Errorf("failed to secure detail cache file: %w", err)
-	}
-	data, err := os.ReadFile(c.detailFile)
 	if err != nil {
 		return fmt.Errorf("failed to read detail cache file: %w", err)
 	}
@@ -1136,6 +1131,38 @@ func parseByteSize(raw string) (int64, error) {
 		}
 	}
 	return strconv.ParseInt(value, 10, 64)
+}
+
+func readCacheSnapshot(path string, maxBytes int64) ([]byte, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	name := filepath.Base(path)
+	info, err := root.Stat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("cache snapshot must be a regular file")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if err := file.Chmod(0600); err != nil {
+		return nil, fmt.Errorf("secure cache snapshot: %w", err)
+	}
+	if maxBytes > 0 && maxBytes < math.MaxInt64 {
+		data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+		if int64(len(data)) > maxBytes {
+			return nil, fmt.Errorf("cache snapshot exceeds configured limit")
+		}
+		return data, err
+	}
+	return io.ReadAll(file)
 }
 
 func writePrivateAtomic(path string, data []byte) error {
@@ -2295,7 +2322,7 @@ func (c *Cache) trendHistory() []TrendRecord {
 	c.trendMu.RUnlock()
 
 	var records []TrendRecord
-	data, err := os.ReadFile(trendHistoryPath())
+	data, err := readCacheSnapshot(trendHistoryPath(), 0)
 	if err == nil {
 		var snapshot trendSnapshot
 		if json.Unmarshal(data, &snapshot) == nil && snapshot.SchemaVersion > 0 {
