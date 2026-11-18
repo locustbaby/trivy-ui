@@ -194,6 +194,8 @@ func stripLargeFields(obj interface{}) (interface{}, error) {
 		return obj, nil
 	}
 
+	u.Object["derived"] = deriveSummary(u.Object)
+
 	if reportObj, hasReport := u.Object["report"].(map[string]interface{}); hasReport {
 		stripped := make(map[string]interface{})
 		for _, key := range []string{"summary", "artifact", "scanner", "registry", "updateTimestamp"} {
@@ -202,6 +204,18 @@ func stripLargeFields(obj interface{}) (interface{}, error) {
 			}
 		}
 		u.Object["report"] = stripped
+	}
+	// Compliance reports keep their results in status; only the summary is
+	// needed for lists and the overview, details are fetched on demand.
+	if status, hasStatus := u.Object["status"].(map[string]interface{}); hasStatus {
+		stripped := make(map[string]interface{})
+		for _, key := range []string{"summary", "updateTimestamp"} {
+			if v, exists := status[key]; exists {
+				stripped[key] = v
+			}
+		}
+		u.Object["status"] = stripped
+		delete(u.Object, "spec")
 	}
 
 	return u, nil
@@ -328,6 +342,15 @@ func (m *ReportInformerManager) extractSummaryData(obj map[string]interface{}) m
 		// These will be fetched on-demand when user requests report details
 
 		result["report"] = reportCopy
+	}
+
+	if derived, ok := obj["derived"].(map[string]interface{}); ok {
+		result["derived"] = derived
+	}
+	if status, ok := obj["status"].(map[string]interface{}); ok {
+		if summary, ok := status["summary"].(map[string]interface{}); ok {
+			result["status"] = map[string]interface{}{"summary": summary}
+		}
 	}
 
 	return result

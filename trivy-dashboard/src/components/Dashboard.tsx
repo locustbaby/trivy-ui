@@ -280,16 +280,35 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
     updateUrlParams({ type: vulnerabilityType?.name ?? null, namespace: ns })
   }, [reportTypes, updateUrlParams])
 
+  // One container: open its report. Several: list the workload's reports.
   const handleSelectWorkload = useCallback((w: WorkloadSummary) => {
+    const reports = w.reports ?? [w.name]
+    if (reports.length === 1) {
+      updateUrlParams({
+        type: w.type,
+        report: reports[0],
+        reportNamespace: w.namespace || CLUSTER_SCOPED_NAMESPACE,
+        cluster: w.cluster,
+        namespace: null,
+        search: null,
+      })
+      return
+    }
     updateUrlParams({
       type: w.type,
-      report: w.name,
-      reportNamespace: w.namespace || CLUSTER_SCOPED_NAMESPACE,
       cluster: w.cluster,
-      namespace: null,
-      search: null,
+      namespace: w.namespace || null,
+      search: w.name,
+      report: null,
+      reportNamespace: null,
     })
   }, [updateUrlParams])
+
+  const handleSelectOverviewType = useCallback((type: string) => {
+    if (reportTypes.some((reportType) => reportType.name === type)) {
+      handleSelectType(type)
+    }
+  }, [reportTypes, handleSelectType])
 
   useEffect(() => {
     if (!selectedCluster) {
@@ -452,6 +471,7 @@ export function Dashboard({ username, onLogout }: DashboardProps) {
                 onSelectNamespace={handleSelectNamespace}
                 onSelectWorkload={handleSelectWorkload}
                 onSelectCluster={handleSelectCluster}
+                onSelectType={handleSelectOverviewType}
               />
             </Suspense>
           )}

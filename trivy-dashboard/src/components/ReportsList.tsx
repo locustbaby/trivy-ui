@@ -546,11 +546,15 @@ function ReportsListInternal({
     }
 
     if (summary && typeof summary === "object") {
+      const derived = dataRecord.derived as { fixable?: Record<string, unknown> } | undefined
+      const fixable = derived?.fixable
       return {
         critical: Number(summary.criticalCount) || 0,
         high: Number(summary.highCount) || 0,
         medium: Number(summary.mediumCount) || 0,
         low: Number(summary.lowCount) || 0,
+        unknown: Number(summary.unknownCount) || 0,
+        fixableCriticalHigh: fixable ? (Number(fixable.critical) || 0) + (Number(fixable.high) || 0) : undefined,
       }
     }
     return null
@@ -704,8 +708,11 @@ function ReportsListInternal({
             {filteredReports.map((report) => {
               const reportId = reportIdentity(report)
               const counts = getSummaryCounts(report)
-              const hasSeverity = counts && (counts.critical > 0 || counts.high > 0 || counts.medium > 0 || counts.low > 0)
-              const workloadKind = extractWorkloadKind(report.name)
+              const hasSeverity = counts && (counts.critical > 0 || counts.high > 0 || counts.medium > 0 || counts.low > 0 || counts.unknown > 0)
+              const workload = report.workload
+              // Show the workload (e.g. the Deployment) when it differs from the report name.
+              const workloadKind = workload?.kind || extractWorkloadKind(report.name)
+              const title = workload?.kind && workload.name ? workload.name : report.name
 
               return (
                 <div
@@ -721,7 +728,18 @@ function ReportsListInternal({
                             {workloadKind}
                           </span>
                         )}
-                        <span className="font-semibold text-base truncate">{report.name}</span>
+                        <span className="font-semibold text-base truncate" title={report.name}>{title}</span>
+                        {title !== report.name && (
+                          <span className="text-xs text-muted-foreground truncate max-w-[18rem]" title={report.name}>{report.name}</span>
+                        )}
+                        {workload?.retired && (
+                          <span
+                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-muted text-muted-foreground border"
+                            title="Old ReplicaSet kept for rollback; not counted in the overview"
+                          >
+                            Retired
+                          </span>
+                        )}
                         {hasSeverity ? (
                           <div className="flex items-center gap-1.5">
                             {counts.critical > 0 && (
@@ -750,6 +768,18 @@ function ReportsListInternal({
                                 <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
                                 <span>{counts.low}</span>
                                 <span className="text-[9px] font-bold opacity-75">LOW</span>
+                              </span>
+                            )}
+                            {counts.unknown > 0 && (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 text-xs font-medium" title={`${counts.unknown} with no severity assigned yet`}>
+                                <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                                <span>{counts.unknown}</span>
+                                <span className="text-[9px] font-bold opacity-75">UNK</span>
+                              </span>
+                            )}
+                            {(counts.fixableCriticalHigh ?? 0) > 0 && (
+                              <span className="text-xs text-muted-foreground" title="Critical and High findings with a fixed version">
+                                {counts.fixableCriticalHigh} fixable
                               </span>
                             )}
                           </div>
