@@ -208,7 +208,13 @@ jobs:
           STATIC_PATH: /tmp/trivy-ui-static # no UI assets needed for API e2e
         run: |
           mkdir -p "$DATA_PATH" "$STATIC_PATH"
-          nohup /tmp/trivy-ui-server > /tmp/trivy-ui-server.log 2>&1 &
+          mount_dir="$RUNNER_TEMP/trivy-ui-kubeconfigs"
+          mkdir -p "$mount_dir/..revision"
+          cp "$KUBECONFIG" "$mount_dir/..revision/kwok.yaml"
+          ln -s ..revision "$mount_dir/..data"
+          ln -s ..data/kwok.yaml "$mount_dir/kwok.yaml"
+          KUBECONFIG_DIR="$mount_dir" KUBECONFIG="$mount_dir/.unused" \
+            nohup /tmp/trivy-ui-server > /tmp/trivy-ui-server.log 2>&1 &
           echo "SERVER_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for readiness
