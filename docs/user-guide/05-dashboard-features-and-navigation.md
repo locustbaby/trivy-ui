@@ -81,6 +81,10 @@ Each report card provides concise, actionable metadata:
 - **Cluster & namespace shortcuts**: Click the cluster or namespace badge to copy its name to the clipboard.
 - **Share report link**: Hover over the card and click the share icon to copy the direct URL.
 - **Drill-down cue**: Click anywhere on the card to open the complete report detail drawer.
+- **Rescan** (when enabled for your account): Hover over the card and click the rescan icon, then *Rescan now?* to confirm. A `Rescanning` badge stays on the card until the Trivy Operator has written the new report.
+
+### Bulk rescan
+**Rescan…** next to *Refresh* scans every report of the current type and namespace filter again, optionally only reports older than 6 hours to 3 days. It shows how many reports match before anything happens. The operator scans them one after another, so large selections take a while; current results stay visible until each new scan is done.
 
 ---
 
@@ -88,7 +92,7 @@ Each report card provides concise, actionable metadata:
 
 ![Report Details](../images/user-guide/report-details.png)
 
-Clicking any report opens the comprehensive report detail drawer:
+Clicking any report opens the comprehensive report detail drawer. When rescanning is enabled for your account, **Rescan** in the header scans the workload again; the previous result stays visible with a notice until the new one replaces it.
 
 
 - **Vulnerabilities tab**:

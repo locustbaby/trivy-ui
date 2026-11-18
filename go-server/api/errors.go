@@ -20,6 +20,9 @@ const (
 	ErrReportAmbiguous     ErrorCode = "REPORT_AMBIGUOUS"
 	ErrProviderUnavailable ErrorCode = "PROVIDER_UNAVAILABLE"
 	ErrDataIncomplete      ErrorCode = "DATA_INCOMPLETE"
+	ErrRescanDisabled      ErrorCode = "RESCAN_DISABLED"
+	ErrRescanLimit         ErrorCode = "RESCAN_LIMIT"
+	ErrConflict            ErrorCode = "CONFLICT"
 )
 
 // writeError emits the canonical JSON error envelope and logs the failure

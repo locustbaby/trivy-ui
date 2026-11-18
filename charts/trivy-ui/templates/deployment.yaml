@@ -1,5 +1,8 @@
-{{- if not (has .Values.auth.mode (list "none" "local")) }}
-{{- fail "auth.mode must be one of: none, local" }}
+{{- if not (has .Values.auth.mode (list "none" "local" "proxy")) }}
+{{- fail "auth.mode must be one of: none, local, proxy" }}
+{{- end }}
+{{- if and (eq .Values.auth.mode "proxy") (empty .Values.auth.proxy.trustedCIDRs) }}
+{{- fail "auth.proxy.trustedCIDRs is required when auth.mode=proxy" }}
 {{- end }}
 {{- if eq .Values.auth.mode "local" }}
 {{- if ne .Values.auth.local.backend "file" }}
@@ -82,6 +85,26 @@ spec:
               value: {{ .Values.auth.session.cookieSecure | quote }}
             - name: AUTH_COOKIE_SAME_SITE
               value: {{ .Values.auth.session.cookieSameSite | quote }}
+            {{- if eq .Values.auth.mode "proxy" }}
+            - name: AUTH_PROXY_USER_HEADER
+              value: {{ .Values.auth.proxy.userHeader | quote }}
+            - name: AUTH_PROXY_GROUPS_HEADER
+              value: {{ .Values.auth.proxy.groupsHeader | quote }}
+            - name: AUTH_PROXY_TRUSTED_CIDRS
+              value: {{ .Values.auth.proxy.trustedCIDRs | quote }}
+            {{- end }}
+            - name: ENABLE_RESCAN
+              value: {{ .Values.rescan.enabled | quote }}
+            {{- if .Values.rescan.enabled }}
+            - name: RESCAN_GROUPS
+              value: {{ join "," .Values.rescan.groups | quote }}
+            - name: RESCAN_TYPES
+              value: {{ join "," .Values.rescan.types | quote }}
+            - name: RESCAN_TIMEOUT
+              value: {{ .Values.rescan.timeout | quote }}
+            - name: RESCAN_MAX_BULK
+              value: {{ .Values.rescan.maxBulk | quote }}
+            {{- end }}
             - name: CLUSTER_SOURCES
               value: {{ if .Values.clusterSources }}{{ .Values.clusterSources | toJson | quote }}{{ else }}""{{ end }}
             - name: CACHE_DETAIL_MAX_SIZE

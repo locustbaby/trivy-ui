@@ -46,6 +46,36 @@ export interface Report {
   data: unknown
   ref?: ReportRef
   updated_at?: string
+  rescan?: RescanState
+}
+
+export interface RescanState {
+  requestedAt: string
+  requestedBy: string
+}
+
+export interface RescanStatus {
+  enabled: boolean
+  allowed: boolean
+  types: string[]
+  maxBulk: number
+  pending: { ref: ReportRef; requestedAt: string; requestedBy: string }[]
+}
+
+export interface BulkRescanRequest {
+  cluster: string
+  namespaces?: string[]
+  types?: string[]
+  olderThan?: string
+  dryRun?: boolean
+}
+
+export interface BulkRescanResult {
+  count: number
+  maxBulk?: number
+  accepted?: number
+  reports?: ReportRef[]
+  failed?: { ref: ReportRef; reason: string }[]
 }
 
 export interface ReportRef {
@@ -164,7 +194,7 @@ async function fetchApi<T>(url: string, signal?: AbortSignal): Promise<T> {
 
 export interface AuthMe {
   enabled: boolean
-  mode: "none" | "local"
+  mode: "none" | "local" | "proxy"
   authenticated: boolean
   provider?: string
   methods?: string[]
@@ -189,6 +219,30 @@ async function sendAuth<T>(url: string, body?: unknown): Promise<T> {
     throw new ApiError(response.status, result.message || `HTTP error! status: ${response.status}`, result.error?.type, result.error?.requestId)
   }
   return result.data as T
+}
+
+// postApi sends a JSON POST and leaves error presentation to the caller (no
+// global access-denied toast), so rescan failures show one specific message.
+async function postApi<T>(url: string, body?: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${url}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const result: ApiResponse<T> = await response.json().catch(() => ({ code: 1, message: `HTTP error! status: ${response.status}` }))
+  if (!response.ok || result.code !== 0) {
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent("trivy-ui:auth-expired"))
+    }
+    throw new ApiError(response.status, result.message || `HTTP error! status: ${response.status}`, result.error?.type, result.error?.requestId)
+  }
+  return result.data as T
+}
+
+function reportPath(cluster: string, typeName: string, namespace: string, reportName: string): string {
+  const namespaceSegment = namespace || CLUSTER_SCOPED_NAMESPACE
+  return `/api/v1/reports/${encodeURIComponent(cluster)}/${encodeURIComponent(typeName)}/${encodeURIComponent(namespaceSegment)}/${encodeURIComponent(reportName)}`
 }
 
 export const api = {
@@ -258,8 +312,13 @@ export const api = {
     reportName: string,
     signal?: AbortSignal
   ): Promise<Report> => {
-    const namespaceSegment = namespace || CLUSTER_SCOPED_NAMESPACE
-    const url = `/api/v1/reports/${encodeURIComponent(cluster)}/${encodeURIComponent(typeName)}/${encodeURIComponent(namespaceSegment)}/${encodeURIComponent(reportName)}`
-    return fetchApi<Report>(url, signal)
+    return fetchApi<Report>(reportPath(cluster, typeName, namespace, reportName), signal)
   },
+
+  getRescanStatus: (signal?: AbortSignal): Promise<RescanStatus> => fetchApi<RescanStatus>("/api/v1/rescan", signal),
+
+  rescanReport: (cluster: string, namespace: string, typeName: string, reportName: string): Promise<{ rescan: RescanState }> =>
+    postApi<{ rescan: RescanState }>(`${reportPath(cluster, typeName, namespace, reportName)}/rescan`),
+
+  rescanBulk: (request: BulkRescanRequest): Promise<BulkRescanResult> => postApi<BulkRescanResult>("/api/v1/rescan", request),
 }

@@ -363,6 +363,9 @@ func (c *Cache) DeleteReportEntry(cluster, namespace, reportType, name string) {
 }
 
 func (c *Cache) deleteReportEntryByKey(key string) {
+	if rescans.holds(key) {
+		return
+	}
 	cluster, namespace, reportType, name, ok := parseReportCacheKey(key)
 	if !ok {
 		c.Delete(key)
@@ -1552,6 +1555,7 @@ func (c *CacheUpdaterImpl) SetReport(cluster, namespace, reportType, name string
 	apiReport.Ref = ReportRef{Cluster: cluster, Namespace: namespace, Type: reportType, Name: name}
 
 	key := reportKey(cluster, namespace, reportType, name)
+	rescans.observe(key, report.ResourceVersion)
 	previous, found := cache.Get(key)
 	if found {
 		if previousReport, ok := decodeReportValue(previous); ok {

@@ -4,20 +4,28 @@ import { ErrorBoundary } from "./components/ErrorBoundary"
 import { LoginPage } from "./components/LoginPage"
 import { api, ApiError } from "./api/client"
 import { invalidateCached } from "./lib/apiCache"
+import { resetRescanCapabilities } from "./lib/rescan"
 import { toast } from "./lib/toast"
 import { CustomErrorPage } from "./components/CustomErrorPage"
 import { ToastHost } from "./components/ToastHost"
 import "./App.css"
 
 function App() {
-  const [state, setState] = useState<"loading" | "login" | "ready" | "unavailable">("loading")
+  const [state, setState] = useState<"loading" | "login" | "ready" | "unavailable" | "proxy-signed-out">("loading")
   const [username, setUsername] = useState<string>()
+  const [proxyMode, setProxyMode] = useState(false)
 
   const checkAuth = useCallback(async () => {
+    resetRescanCapabilities()
     try {
       const auth = await api.getAuthMe()
       setUsername(auth.username)
-      setState(auth.mode === "none" || auth.authenticated ? "ready" : "login")
+      setProxyMode(auth.mode === "proxy")
+      if (auth.mode === "none" || auth.authenticated) {
+        setState("ready")
+      } else {
+        setState(auth.mode === "proxy" ? "proxy-signed-out" : "login")
+      }
     } catch (err) {
       setState(err instanceof ApiError && err.status === 503 ? "unavailable" : "login")
     }
@@ -29,6 +37,11 @@ function App() {
 
   useEffect(() => {
     const handleAuthExpired = () => {
+      if (proxyMode) {
+        // The authenticating proxy signs the user in again on a full page load.
+        window.location.reload()
+        return
+      }
       setUsername(undefined)
       setState("login")
       toast("Your session has expired. Please sign in again.", "info")
@@ -47,7 +60,7 @@ function App() {
       window.removeEventListener("trivy-ui:access-denied", handleAccessDenied)
       window.removeEventListener("trivy-ui:service-unavailable", handleServiceUnavailable)
     }
-  }, [])
+  }, [proxyMode])
 
   if (state === "loading") {
     return (
@@ -65,6 +78,17 @@ function App() {
       </>
     )
   }
+  if (state === "proxy-signed-out") {
+    return (
+      <CustomErrorPage>
+        <div className="flex min-h-screen flex-col items-center justify-center gap-3 text-muted-foreground">
+          <p>You are not signed in. Sign-in is handled by the authenticating proxy.</p>
+          <button className="underline" onClick={() => window.location.reload()}>Reload to sign in</button>
+        </div>
+        <ToastHost />
+      </CustomErrorPage>
+    )
+  }
   if (state === "unavailable") {
     return (
       <CustomErrorPage>
@@ -76,7 +100,10 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <Dashboard username={username} onLogout={() => { invalidateCached(); api.logout().finally(() => { setUsername(undefined); setState("login") }) }} />
+      <Dashboard
+        username={username}
+        onLogout={proxyMode ? undefined : () => { invalidateCached(); resetRescanCapabilities(); api.logout().finally(() => { setUsername(undefined); setState("login") }) }}
+      />
       <ToastHost />
     </ErrorBoundary>
   )

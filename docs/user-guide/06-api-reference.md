@@ -20,6 +20,9 @@ Every response includes an `X-Request-ID` header for tracing and correlation in 
 | `GET` | `/api/v1/reports` | List reports matching filter criteria (paginated) | Public / Scoped |
 | `GET` | `/api/v1/reports/{cluster}/{type}/{namespace}/{name}` | Get complete report details (on-demand K8s query) | Public / Scoped |
 | `GET` | `/api/v1/overview` | Aggregated severity counts, trends, and top workloads | Public / Scoped |
+| `GET` | `/api/v1/rescan` | Whether the current user may rescan, and rescans in progress | Public / Scoped |
+| `POST` | `/api/v1/reports/{cluster}/{type}/{namespace}/{name}/rescan` | Rescan one report (`ENABLE_RESCAN`) | Rescan groups |
+| `POST` | `/api/v1/rescan` | Rescan all matching reports; body `{"cluster", "namespaces", "types", "olderThan", "dryRun"}` | Rescan groups |
 | `POST` | `/api/v1/auth/login` | Authenticate with username and password | Public |
 | `POST` | `/api/v1/auth/logout` | Invalidate current session and clear cookie | Authenticated |
 | `GET` | `/api/v1/auth/me` | Return current user profile, roles, and scopes | Public |
@@ -75,6 +78,9 @@ Every API error response carries a machine-readable code in `error.type`, plus t
 | `REPORT_AMBIGUOUS` | 400 | Query matches multiple reports across namespaces | Narrow query with explicit `namespace` |
 | `PROVIDER_UNAVAILABLE` | 503 | Kubernetes API server unavailable or unreachable | Check cluster connectivity and kubeconfig |
 | `DATA_INCOMPLETE` | 200 / 206 | Cache capacity exceeded; data may be partial | Increase cache size in Helm values |
+| `RESCAN_DISABLED` | 403 | Rescanning is not enabled | Set `ENABLE_RESCAN=true` |
+| `RESCAN_LIMIT` | 400 / 429 | Too many reports in one bulk request, or too many rescans in progress | Narrow the selection or wait |
+| `CONFLICT` | 409 | The report changed between viewing and rescanning | Reload and try again |
 
 ---
 
@@ -95,7 +101,17 @@ curl -s 'http://localhost:8080/api/v1/reports?cluster=prod&type=vulnerabilityrep
 curl -s http://localhost:8080/api/v1/reports/prod/vulnerabilityreports/team-a/my-app-report | jq .
 ```
 
-### 4. Health & Readiness Probe
+### 4. Rescan
+```bash
+# One report (reports being rescanned carry "rescan": {"requestedAt", "requestedBy"})
+curl -s -X POST http://localhost:8080/api/v1/reports/prod/vulnerabilityreports/team-a/replicaset-app-7d9f-app/rescan
+
+# Count first, then rescan every vulnerability report in team-a older than 24h
+curl -s -X POST http://localhost:8080/api/v1/rescan -d '{"cluster":"prod","namespaces":["team-a"],"types":["vulnerabilityreports"],"olderThan":"24h","dryRun":true}'
+curl -s -X POST http://localhost:8080/api/v1/rescan -d '{"cluster":"prod","namespaces":["team-a"],"types":["vulnerabilityreports"],"olderThan":"24h"}'
+```
+
+### 5. Health & Readiness Probe
 ```bash
 curl -i http://localhost:8080/healthz
 curl -i http://localhost:8080/readyz

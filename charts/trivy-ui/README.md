@@ -335,7 +335,12 @@ tolerations:
 | `env.STATIC_PATH` | Static assets path | `trivy-dashboard/dist` |
 | `env.LOG_LEVEL` | Logging level | `info` |
 | `env.CORS_ALLOWED_ORIGINS` | Credentialed cross-origin browser origins | `""` |
-| `auth.mode` | Authentication mode (`none` or `local`) | `none` |
+| `auth.mode` | Authentication mode (`none`, `local` or `proxy`) | `none` |
+| `auth.proxy.trustedCIDRs` | `proxy` mode: CIDRs of the authenticating proxy (required) | `""` |
+| `auth.proxy.userHeader` / `auth.proxy.groupsHeader` | `proxy` mode identity headers | `Remote-User` / `Remote-Groups` |
+| `rescan.enabled` | Allow signed-in users to rescan reports; adds `delete` on `rescan.types` to the ClusterRole | `false` |
+| `rescan.groups` | Groups allowed to rescan (empty: every signed-in user) | `[]` |
+| `rescan.types` | Report types that can be rescanned | workload, RBAC and config report types |
 | `auth.session.cookieSameSite` | Session cookie policy (`lax`, `strict`, `none`); empty derives `none` for explicit CORS origins | `""` |
 | `kubeconfigs.create` | Create kubeconfig secret | `true` |
 | `kubeconfigs.enabled` | Mount the kubeconfig secret | `true` |
@@ -346,7 +351,7 @@ tolerations:
 | `cache.summary.snapshotMaxSize` | Maximum summary snapshot size | `512Mi` |
 | `cache.detail.persist` | Persist full report details | `true` |
 | `cache.detail.maxSize` | In-memory detail cache limit | `256Mi` |
-| `rbac.create` | Create cluster-wide read-only RBAC resources | `true` |
+| `rbac.create` | Create cluster-wide RBAC resources (read-only unless `rescan.enabled`) | `true` |
 
 ## Installation Examples
 
