@@ -124,9 +124,8 @@ func GetErrorPageConfig() *ErrorPageConfig {
 // availability failures; the frontend renders it in place of its default
 // error screens whenever it is configured.
 //
-// Trust model: the file is supplied by whoever deploys the application, so
-// it is rendered by the frontend with the same trust level as the app
-// bundle itself. Never point ERROR_PAGE_FILE at user-writable storage.
+// The mounted file is deployment configuration. The direct response and the
+// frontend iframe both sandbox the document to isolate it from the application.
 //
 // The file is re-read automatically when its modification time changes, so
 // updates take effect without a restart.
@@ -207,6 +206,7 @@ func (c *customErrorPage) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "sandbox; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
 	// Hot-reloadable: never let intermediaries or the browser pin a version.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

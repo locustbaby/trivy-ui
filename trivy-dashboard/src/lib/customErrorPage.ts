@@ -8,8 +8,7 @@ import { API_BASE_URL } from "../api/client"
  *  1. ERROR_PAGE_CONFIG (structured: title/message/contact items) served as
  *     JSON from /api/v1/error-page — rendered natively by the UI.
  *  2. ERROR_PAGE_FILE (raw operator-provided HTML) served at
- *     /error-page.html — rendered with the same trust level as the app
- *     bundle itself; never point it at user-writable storage.
+ *     /error-page.html and displayed in a sandboxed iframe.
  *
  * When neither is configured, hooks resolve to `undefined` and callers fall
  * back to their built-in error UI.

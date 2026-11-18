@@ -226,10 +226,8 @@ func (r *Router) Setup(staticPath string) {
 		}})
 	})
 
-	// Operator-provided custom error page (public, hot-reloadable).
-	if r.errorPage != nil {
-		r.mux.HandleFunc("/error-page.html", r.errorPage.handler)
-	}
+	// Keep the custom error route even when unset so SPA fallback cannot return the app shell here.
+	r.mux.HandleFunc("/error-page.html", r.errorPage.handler)
 
 	// 健康检查端点
 	r.mux.HandleFunc("/healthz", func(w http.ResponseWriter, req *http.Request) {

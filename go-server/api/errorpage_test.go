@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,6 +33,9 @@ func TestCustomErrorPageServesAndHotReloads(t *testing.T) {
 	}
 	if got := rec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
 		t.Fatalf("content-type = %q", got)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.HasPrefix(csp, "sandbox;") {
+		t.Fatalf("custom HTML response must be sandboxed, CSP = %q", csp)
 	}
 	if rec.Body.String() != "<h1>v1</h1>" {
 		t.Fatalf("body = %q", rec.Body.String())
@@ -148,5 +152,19 @@ func TestLoadErrorPageConfigFromEnv(t *testing.T) {
 		if err := LoadErrorPageConfigFromEnv(); err == nil {
 			t.Errorf("expected error for %s", raw)
 		}
+	}
+}
+
+func TestDisabledCustomErrorPageDoesNotServeSpaIndex(t *testing.T) {
+	t.Setenv("ERROR_PAGE_FILE", "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("dashboard"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(nil, dir, nil, nil, nil, nil, nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/error-page.html", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
