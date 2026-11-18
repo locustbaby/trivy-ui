@@ -11,6 +11,31 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
+func TestReadCacheSnapshotRejectsEscapesAndOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte(`{"ok":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "cache.json")
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCacheSnapshot(path, 100); err == nil {
+		t.Fatal("cache read followed a symlink outside the data directory")
+	}
+	info, err := os.Stat(outside)
+	if err != nil || info.Mode().Perm()&0044 == 0 {
+		t.Fatalf("could not verify unchanged external permissions: %v, %v", info, err)
+	}
+	if err := writePrivateAtomic(path, []byte(`{"ok":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCacheSnapshot(path, 4); err == nil {
+		t.Fatal("oversized cache read succeeded")
+	}
+}
+
 func TestWritePrivateAtomicCreatesParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "cache.json")
 	want := []byte(`{"ok":true}`)
